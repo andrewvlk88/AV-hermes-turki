@@ -4,6 +4,9 @@ from typing import List, Optional
 from bs4 import BeautifulSoup
 
 from src.models import ProductPrice, Store
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class StoreScraper:
@@ -299,7 +302,8 @@ class GenericScraper(StoreScraper):
                             store_url=self.store.url,
                             regular_price=price,
                         ))
-            except:
+            except Exception as e:
+                logger.warning("Failed to parse JSON-LD in GenericScraper: %s", e)
                 continue
         
         if products:

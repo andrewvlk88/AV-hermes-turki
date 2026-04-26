@@ -14,7 +14,28 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+try:
+    from playwright_stealth import stealth_async
+    STEALTH_AVAILABLE = True
+except ImportError:
+    STEALTH_AVAILABLE = False
+
 from src.models import ProductPrice, Store
+from src.logger import get_logger
+
+try:
+    from fake_useragent import UserAgent as _FakeUA
+    _ua_gen = _FakeUA()
+    def _get_ua() -> str:
+        try:
+            return _ua_gen.random
+        except Exception:
+            return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+except ImportError:
+    def _get_ua() -> str:
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+logger = get_logger(__name__)
 
 
 class PlaywrightEngine:
@@ -57,25 +78,27 @@ class PlaywrightEngine:
 async def _create_context(browser):
     """Create a context with stealth settings."""
     context = await browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        user_agent=_get_ua(),
         locale="he-IL",
         timezone_id="Asia/Jerusalem",
         viewport={"width": 1920, "height": 1080},
     )
-    # Hide automation
-    await context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { 
-            get: () => [1, 2, 3, 4, 5] 
-        });
-        Object.defineProperty(navigator, 'languages', { 
-            get: () => ['he-IL', 'he', 'en'] 
-        });
-    """)
+    # Apply playwright-stealth if available (far more comprehensive than manual scripts)
+    if STEALTH_AVAILABLE:
+        page = await context.new_page()
+        await stealth_async(page)
+        await page.close()
+    else:
+        # Fallback: hide automation hints manually
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { 
+                get: () => [1, 2, 3, 4, 5] 
+            });
+            Object.defineProperty(navigator, 'languages', { 
+                get: () => ['he-IL', 'he', 'en'] 
+            });
+        """)
     return context
 
 
@@ -147,8 +170,8 @@ class GenericPlaywrightScraper:
                             });
                         }""")
                         await asyncio.sleep(1)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Age verification handling failed: %s", e)
                     
                     # Wait a bit more for lazy content
                     await page.wait_for_load_state("networkidle", timeout=5000)
@@ -161,7 +184,7 @@ class GenericPlaywrightScraper:
                         return products
                         
                 except Exception as e:
-                    pass
+                    logger.warning("Page navigation/processing failed for %s: %s", search_url, e)
                 finally:
                     await page.close()
         finally:
@@ -205,7 +228,8 @@ class GenericPlaywrightScraper:
                             regular_price=price,
                             product_url=item.get("url", ""),
                         ))
-            except:
+            except Exception as e:
+                logger.warning("Failed to parse JSON-LD in GenericPlaywrightScraper: %s", e)
                 continue
         
         if products:
@@ -370,7 +394,8 @@ class WineAndMoreScraper(GenericPlaywrightScraper):
                                 ))
                             except (ValueError, TypeError):
                                 continue
-            except:
+            except Exception as e:
+                logger.warning("Failed to parse JSON-LD in WineAndMoreScraper: %s", e)
                 continue
         
         if products:

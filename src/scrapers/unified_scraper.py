@@ -7,16 +7,31 @@ from bs4 import BeautifulSoup
 import httpx
 
 try:
+    from fake_useragent import UserAgent as _FakeUA
+    _ua_gen = _FakeUA()
+    def _get_ua() -> str:
+        try:
+            return _ua_gen.random
+        except Exception:
+            return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+except ImportError:
+    def _get_ua() -> str:
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+try:
     from src.scrapers.playwright_scrapers import PLAYWRIGHT_AVAILABLE
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 from src.models import ProductPrice, Store
 from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 BASE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": _get_ua(),
     "Accept": "application/json",
 }
 
@@ -45,7 +60,8 @@ class WooCommerceAPIScraper:
                         data = resp.json()
                         if isinstance(data, list) and len(data) > 0:
                             return self._parse_products(data, query)
-                except:
+                except Exception as e:
+                    logger.warning("WooCommerce API request failed for %s: %s", url, e)
                     continue
         
         return []
@@ -207,7 +223,8 @@ class MagentoAPIScraper:
                 if resp.status_code != 200:
                     return []
                 data = resp.json()
-            except:
+            except Exception as e:
+                logger.warning("Magento API request failed for %s: %s", self.store.url, e)
                 return []
         
         items = data.get("items", [])
@@ -289,7 +306,7 @@ class HTMLFallbackScraper:
         ]
         
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": _get_ua(),
             "Accept": "text/html",
             "Accept-Language": "he-IL,he;q=0.9",
         }
@@ -305,7 +322,8 @@ class HTMLFallbackScraper:
                         products = self._parse_html(resp.text, query)
                         if products:
                             return products
-                except:
+                except Exception as e:
+                    logger.warning("HTML fallback request failed for %s: %s", search_url, e)
                     continue
         
         return []
@@ -347,7 +365,8 @@ class HTMLFallbackScraper:
                             regular_price=price,
                             product_url=item.get("url", ""),
                         ))
-            except:
+            except Exception as e:
+                logger.warning("Failed to parse JSON-LD in HTML fallback: %s", e)
                 continue
         
         if products:
@@ -477,9 +496,17 @@ class UnifiedScraper:
     
     @staticmethod
     async def search_all(query: str, progress_callback=None) -> dict:
-        """Search ALL stores in parallel using sub-agents."""
+        """Search ALL stores in parallel using sub-agents.
+        
+        Uses Semaphore(3) to limit concurrent requests and avoid
+        triggering WAF/DDoS protections on store servers.
+        """
         all_prices = {}
-        tasks = []
+        semaphore = asyncio.Semaphore(3)
+        
+        async def search_with_limit(name, scraper, query):
+            async with semaphore:
+                return await scraper.search(query)
         
         for name, url, engine, pattern in UnifiedScraper.STORE_CONFIGS:
             store = Store(name=name, url=url, search_path=pattern or "", type="static")
@@ -489,9 +516,9 @@ class UnifiedScraper:
                 continue
                 
             scraper = UnifiedScraper.get_scraper(name, url)
-            tasks.append((name, scraper.search(query)))
+            tasks.append((name, search_with_limit(name, scraper, query)))
         
-        # Run all searches in parallel
+        # Run all searches in parallel (limited to 3 concurrent)
         import asyncio
         results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
         

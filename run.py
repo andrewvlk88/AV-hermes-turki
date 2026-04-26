@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import List
 from datetime import datetime
+import logging
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -13,6 +14,7 @@ from src.scrapers.api_scrapers import HaturkiAPIScraper
 from src.scrapers.unified_scraper import UnifiedScraper
 from src.export.csv_export import bulk_export
 from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, extract_volume_ml
+from src.scrapers.playwright_scrapers import PlaywrightEngine
 
 from src.models import Store
 
@@ -48,20 +50,21 @@ def normalize_for_matching(name: str) -> str:
     return name
 
 
-def get_volume_key(name: str) -> float:
-    """Get volume in ml for grouping. Returns 700 as default for liquor without explicit volume.
+def get_volume_key(name: str) -> float | None:
+    """Get volume in ml for grouping. Returns None if volume cannot be determined.
     
     Mini products (with "מיני" in name) default to 50ml.
+    When volume is unknown, returns None so downstream matching falls back
+    to name-only comparison instead of assuming 700ml incorrectly.
     """
     vol = extract_volume_ml(name)
     if vol is not None:
         return vol
-    # Mini products default to 50ml
     name_lower = name.lower()
     if "מיני" in name_lower or "mini" in name_lower:
         return 50.0
-    # If no volume specified, assume it's a standard 700ml bottle
-    return 700.0
+    # Don't assume a default volume — return None so caller can handle unknown volume
+    return None
 
 
 def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
@@ -81,10 +84,16 @@ def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
     if name_key in turki_lookup:
         return turki_lookup[name_key]
     
+    # Try name-only match (for products without volume info)
+    if name_part in turki_lookup:
+        return turki_lookup[name_part]
+    
     # Extract target volume for matching
     target_vol = 0
     try:
-        target_vol = float(name_key.rsplit('_', 1)[1])
+        vol_str = name_key.rsplit('_', 1)[1]
+        if vol_str != "unknown":
+            target_vol = float(vol_str)
     except (ValueError, IndexError):
         pass
     
@@ -108,7 +117,7 @@ def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
     #  because the turki has FEWER words — it's a different product)
     # We only allow match if the QUERY product has FEWER or EQUAL words to the turki
     # i.e., turki "ג׳ דניאלס דבש" can match product "ג׳ דניאלס דבש" but not "ג׳ דניאלס מאסטר"
-    if len(name_part) >= 10:
+    if len(name_part) >= 10 and target_vol > 0:
         for tk, tv in turki_lookup.items():
             tk_name = tk.rsplit('_', 1)[0] if '_' in tk else tk
             tk_vol = 0
@@ -189,9 +198,14 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
         if best:
             norm_name = normalize_for_matching(p.product_name)
             vol_key = get_volume_key(p.product_name)
-            full_key = f"{norm_name}_{vol_key:.0f}"
-            if full_key not in turki_lookup:
-                turki_lookup[full_key] = {"price": best, "url": p.product_url, "name": p.product_name}
+            if vol_key is not None:
+                full_key = f"{norm_name}_{vol_key:.0f}"
+                if full_key not in turki_lookup:
+                    turki_lookup[full_key] = {"price": best, "url": p.product_url, "name": p.product_name}
+            else:
+                # No volume info — match by name only
+                if norm_name not in turki_lookup:
+                    turki_lookup[norm_name] = {"price": best, "url": p.product_url, "name": p.product_name}
     
     # Group by product — use normalized name + volume as key
     all_entries = {}
@@ -202,7 +216,10 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
                 continue
             norm_name = normalize_for_matching(p.product_name)
             vol = get_volume_key(p.product_name)
-            key = f"{norm_name}_{vol:.0f}"
+            if vol is not None:
+                key = f"{norm_name}_{vol:.0f}"
+            else:
+                key = f"{norm_name}_unknown"
             if key not in all_entries:
                 all_entries[key] = {"display_name": p.product_name, "entries": []}
             all_entries[key]["entries"].append({
@@ -302,51 +319,55 @@ def format_telegram(report: PriceReport) -> str:
 
 
 async def async_main(queries: List[str], output_dir: str = "data"):
-    for query in queries:
-        print(f"\n{'='*50}")
-        print(f"🔎 *{query}*")
-        print(f"{'='*50}")
-        
-        # Search all stores
-        all_prices = await search_all(query)
-        
-        # Build report
-        print(f"\n📊 בונים דוח...")
-        report = build_report(all_prices, query)
-        
-        # Save
-        base = Path(output_dir)
-        base.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe = query.replace(" ", "_")[:30]
-        
-        # JSON
-        json_path = base / f"{safe}_{ts}.json"
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(report.model_dump(), f, ensure_ascii=False, indent=2)
-        
-        # TXT summary
-        txt_path = base / f"{safe}_{ts}.txt"
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(report.summary)
-            if report.deals_found:
-                f.write("\n🔥 מבצעים:\n")
-                for d in report.deals_found:
-                    f.write(f"  {d}\n")
-        
-        print(f"📁 JSON: {json_path}")
-        print(f"📄 דוח: {txt_path}")
-        
-        # CSV export
-        all_products = []
-        for products in all_prices.values():
-            all_products.extend(products)
-        
-        if all_products:
-            csv_paths = bulk_export(all_prices, report, output_dir, query=query)
-        
-        # Telegram format
-        print(f"\n{format_telegram(report)}")
+    try:
+        for query in queries:
+            print(f"\n{'='*50}")
+            print(f"🔎 *{query}*")
+            print(f"{'='*50}")
+            
+            # Search all stores
+            all_prices = await search_all(query)
+            
+            # Build report
+            print(f"\n📊 בונים דוח...")
+            report = build_report(all_prices, query)
+            
+            # Save
+            base = Path(output_dir)
+            base.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe = query.replace(" ", "_")[:30]
+            
+            # JSON
+            json_path = base / f"{safe}_{ts}.json"
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(report.model_dump(), f, ensure_ascii=False, indent=2)
+            
+            # TXT summary
+            txt_path = base / f"{safe}_{ts}.txt"
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(report.summary)
+                if report.deals_found:
+                    f.write("\n🔥 מבצעים:\n")
+                    for d in report.deals_found:
+                        f.write(f"  {d}\n")
+            
+            print(f"📁 JSON: {json_path}")
+            print(f"📄 דוח: {txt_path}")
+            
+            # CSV export
+            all_products = []
+            for products in all_prices.values():
+                all_products.extend(products)
+            
+            if all_products:
+                csv_paths = bulk_export(all_prices, report, output_dir, query=query)
+            
+            # Telegram format
+            print(f"\n{format_telegram(report)}")
+    finally:
+        # Always close Playwright browser to prevent zombie Chromium processes
+        await PlaywrightEngine.close()
 
 
 def main():

@@ -4,7 +4,22 @@ from typing import List, Optional
 from bs4 import BeautifulSoup
 import httpx
 
+try:
+    from fake_useragent import UserAgent as _FakeUA
+    _ua_gen = _FakeUA()
+    def _get_ua() -> str:
+        try:
+            return _ua_gen.random
+        except Exception:
+            return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+except ImportError:
+    def _get_ua() -> str:
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 from src.models import ProductPrice, Store
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class MagentoHTMLScraper:
@@ -21,7 +36,7 @@ class MagentoHTMLScraper:
         """Search via HTML."""
         search_url = f"{self.store.url}/search?q={query}&limit=20"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": _get_ua(),
             "Accept": "text/html",
             "Accept-Language": "he-IL,he;q=0.9",
         }
@@ -31,7 +46,8 @@ class MagentoHTMLScraper:
                 resp = await client.get(search_url, headers=headers)
                 if resp.status_code != 200:
                     return []
-            except:
+            except Exception as e:
+                logger.warning("MagentoHTMLScraper request failed for %s: %s", self.store.url, e)
                 return []
         
         soup = BeautifulSoup(resp.text, "lxml")
@@ -118,7 +134,7 @@ class SarHascraper:
     async def search(self, query: str) -> List[ProductPrice]:
         search_url = f"{self.store.url}/?s={query}&post_type=product"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": _get_ua(),
             "Accept": "text/html",
         }
         
@@ -127,7 +143,8 @@ class SarHascraper:
                 resp = await client.get(search_url, headers=headers)
                 if resp.status_code != 200:
                     return []
-            except:
+            except Exception as e:
+                logger.warning("SarHascraper request failed for %s: %s", self.store.url, e)
                 return []
         
         soup = BeautifulSoup(resp.text, "lxml")
@@ -211,7 +228,7 @@ class ProdBoxScraper:
     async def search(self, query: str) -> List[ProductPrice]:
         search_url = self.store.url.rstrip("/") + self.search_pattern.replace("{query}", query)
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": _get_ua(),
             "Accept": "text/html",
         }
         
@@ -220,7 +237,8 @@ class ProdBoxScraper:
                 resp = await client.get(search_url, headers=headers)
                 if resp.status_code != 200:
                     return []
-            except:
+            except Exception as e:
+                logger.warning("ProdBoxScraper request failed for %s: %s", self.store.url, e)
                 return []
         
         soup = BeautifulSoup(resp.text, "lxml")

@@ -6,8 +6,23 @@ from typing import List, Optional
 from bs4 import BeautifulSoup
 import httpx
 
+try:
+    from fake_useragent import UserAgent as _FakeUA
+    _ua_gen = _FakeUA()
+    def _get_ua() -> str:
+        try:
+            return _ua_gen.random
+        except Exception:
+            return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+except ImportError:
+    def _get_ua() -> str:
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 from src.models import ProductPrice, Store
 from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, extract_volume_ml
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class HaturkiAPIScraper:
@@ -21,7 +36,7 @@ class HaturkiAPIScraper:
     async def search(self, query: str) -> List[ProductPrice]:
         """Search products via the Haturki API."""
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": _get_ua(),
             "Accept": "application/json",
             "Origin": "https://haturki.com",
             "Referer": "https://haturki.com/",
@@ -210,7 +225,8 @@ class GenericAPIScraper:
                             regular_price=price,
                             product_url=item.get("url", ""),
                         ))
-            except:
+            except Exception as e:
+                logger.warning("Failed to parse JSON-LD in GenericAPIScraper: %s", e)
                 continue
         
         if products:

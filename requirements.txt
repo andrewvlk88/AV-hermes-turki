@@ -7,3 +7,4 @@ pydantic>=2.0.0
 rich>=13.0.0
 httpx>=0.26.0
 fake-useragent>=1.4.0
+playwright-stealth>=1.0.0

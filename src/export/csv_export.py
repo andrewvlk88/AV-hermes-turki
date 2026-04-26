@@ -86,13 +86,11 @@ def export_tracking_csv(
             for entry in r.all_prices:
                 price = entry["price"]
                 turki_price = r.turki_price or None
-                diff = round(turki_price - price, 2) if turki_price and price < turki_price else ""
-                savings_pct = round((diff / turki_price) * 100, 1) if isinstance(diff, (int, float)) and diff > 0 else ""
-                diff_str = f"{diff:.0f}" if isinstance(diff, (int, float)) and diff > 0 else ""
-                savings_str = f"{savings_pct:.0f}%" if savings_pct != "" else ""
+                diff = round(turki_price - price, 2) if turki_price is not None and price < turki_price else None
+                savings_pct = round((diff / turki_price) * 100, 1) if isinstance(diff, (int, float)) and diff > 0 else None
                 
-                vol = entry.get("volume_ml", "")
-                vol_str = f"{vol:.0f}" if vol else ""
+                vol = entry.get("volume_ml")
+                vol_val = round(vol) if vol is not None else None
                 
                 writer.writerow([
                     date_str,
@@ -101,13 +99,13 @@ def export_tracking_csv(
                     search_query,
                     r.product_name,
                     entry["store"],
-                    f"{price:.0f}",
-                    f"{turki_price:.0f}" if turki_price else "",
-                    diff_str,
-                    savings_str,
-                    vol_str,
-                    "✅" if entry.get("is_sale") else "",
-                    entry.get("url", ""),
+                    round(price),
+                    round(turki_price) if turki_price is not None else None,
+                    diff,
+                    savings_pct,
+                    vol_val,
+                    "✅" if entry.get("is_sale") else None,
+                    entry.get("url", "") or None,
                 ])
     
     action = "עודכן" if file_exists else "נוצר"
@@ -146,14 +144,14 @@ def export_products_csv(products: List[ProductPrice], output_path: str = None) -
             writer.writerow([
                 p.product_name,
                 p.store_name,
-                f"{p.regular_price:.2f}" if p.regular_price else "",
-                f"{p.sale_price:.2f}" if p.sale_price else "",
-                "✅ כן" if p.is_on_sale else "",
-                f"{p.volume_ml:.0f}" if p.volume_ml else "",
+                round(p.regular_price, 2) if p.regular_price is not None else None,
+                round(p.sale_price, 2) if p.sale_price is not None else None,
+                "✅ כן" if p.is_on_sale else None,
+                round(p.volume_ml) if p.volume_ml is not None else None,
                 p.unit,
-                p.sku,
-                p.category,
-                p.product_url,
+                p.sku or None,
+                p.category or None,
+                p.product_url or None,
                 p.timestamp[:16],
             ])
     
