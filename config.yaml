@@ -1,0 +1,174 @@
+# Turkí Price Intelligence - Updated Configuration
+# 20 Israeli alcohol stores (verified working)
+# Last updated: 2026-04-26
+
+stores:
+  - id: 1
+    name: "הטורקי"
+    url: "https://haturki.com"
+    search_path: "/search?q={query}"
+    type: "dynamic"
+    platform: "WordPress"
+    note: "Reference store - has API at api.haturki.com/api"
+
+  - id: 2
+    name: "פאנקו"
+    url: "https://www.paneco.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "Magento"
+    note: "אחת הזולות והגדולות"
+
+  - id: 3
+    name: "בנא משקאות"
+    url: "https://www.banamashkaot.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "רשת ארצית ותיקה"
+
+  - id: 4
+    name: "היבואן"
+    url: "https://www.the-importer.co.il"
+    search_path: "/search?q={query}"
+    type: "dynamic"
+    platform: "Magento"
+    note: "מבצעים חזקים"
+
+  - id: 5
+    name: "דרך היין"
+    url: "https://www.wineroute.co.il"
+    search_path: "/?s={query}"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "חזקה ביינות"
+
+  - id: 6
+    name: "עולם היין"
+    url: "https://www.olamhayain.co.il"
+    search_path: ""
+    type: "dynamic"
+    platform: "?"
+    note: "❌ לא נגיש - ConnectError"
+
+  - id: 7
+    name: "שר המשקאות"
+    url: "https://www.mashkaot.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "Custom"
+    note: "סיטונאי + קמעונאי"
+
+  - id: 8
+    name: "אליאסי משקאות"
+    url: "https://www.eliasi.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "Custom"
+    note: "בוטיק + משלוחים"
+
+  - id: 9
+    name: "ארי משקאות"
+    url: "https://www.ari-g.co.il"
+    search_path: "/search/result/?q={query}"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "מחירים תחרותיים"
+
+  - id: 10
+    name: "Liquor Store"
+    url: "https://www.liquor-store.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "רשת מקצועית"
+
+  - id: 11
+    name: "אלכוהום"
+    url: "https://www.alcohome.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "משלוחים מהירים"
+
+  - id: 12
+    name: "משקאות המשמח"
+    url: "https://www.hamesameach.co.il"
+    search_path: "/search/result/?q={query}"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "פרימיום (ירושלים)"
+
+  - id: 13
+    name: "מנו וינו"
+    url: "https://www.manovino.co.il"
+    search_path: "/search?q={query}"
+    type: "dynamic"
+    platform: "Shopify"
+    note: "יינות מובחרים"
+
+  - id: 14
+    name: "בית המשקאות של אביב"
+    url: "https://www.avivdrinks.co.il"
+    search_path: "/search/result/?q={query}"
+    type: "dynamic"
+    platform: "WordPress"
+    note: "יבנה"
+
+  - id: 15
+    name: "Wine & More"
+    url: "https://www.wineandmore.co.il"
+    search_path: "/search?q={query}"
+    type: "dynamic"
+    platform: "Custom"
+    note: "מבחר גדול"
+
+  - id: 16
+    name: "לגימה"
+    url: "https://www.legima.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "Custom"
+    note: "יינות ואלכוהול"
+
+  - id: 17
+    name: "Coffeco"
+    url: "https://www.coffeco.co.il"
+    search_path: "/search/result/?q={query}"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "זולה ומשלוחים"
+
+  - id: 18
+    name: "Drinks4U"
+    url: "https://www.drinks4u.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "Custom"
+    note: "משלוחים"
+
+  - id: 19
+    name: "Alcohol123"
+    url: "https://www.alcohol123.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "משלוח VIP"
+
+  - id: 20
+    name: "בית היין"
+    url: "https://www.winehouse.co.il"
+    search_path: "/?s={query}&post_type=product"
+    type: "dynamic"
+    platform: "WooCommerce"
+    note: "זולה"
+
+tools:
+  playwright_timeout: 15000
+  max_retries: 3
+  concurrent_requests: 3
+
+output:
+  json_dir: "data/json"
+  report_dir: "data/reports"
+  csv_dir: "data/csv"
