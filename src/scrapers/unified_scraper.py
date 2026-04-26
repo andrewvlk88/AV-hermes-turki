@@ -70,28 +70,41 @@ class WooCommerceAPIScraper:
         """Parse WooCommerce Store API response.
         
         Israeli WooCommerce stores inconsistently store prices:
-        - Some use cents (24900 = 249.00₪)
-        - Some use actual shekels (168 = 168₪)
-        - Some use agorot (1590 = 15.90₪)
+        - Some use cents (24900 = 249.00₪) — integer > 1000, should divide by 100
+        - Some use actual shekels (168 = 168₪) — integer < 1000, use as-is
+        - Some use agorot (1590 = 15.90₪) — rare, covered by post-filter
+        - Some use shekels with decimal (179.90) — already in ₪
         
-        Heuristic: if average raw price > 1000, divide by 100.
-        Also filter noise (prices < 5₪, non-product names, irrelevant products, bogus prices).
+        Two-pass heuristic:
+        1. Check if raw prices are integers (no decimal point) AND avg > 1000 → likely cents
+        2. After conversion, verify alcohol bottle price is in sane range (20–5000₪).
+           If conversion yields unrealistic value (< 15₪ or > 5000₪), fall back to original.
         """
         NOISE_WORDS = ["משלוח", "לתקנון", "מבצע", "חינם", "קופון", "שובר"]
         
-        # First pass: collect all raw prices to determine format
+        # First pass: collect raw prices and detect format
         raw_prices = []
         for item in data[:10]:
             prices_data = item.get("prices", {})
             raw = prices_data.get("price", "0") or "0"
             try:
-                raw_prices.append(float(raw))
+                val = float(raw)
+                if val > 0:
+                    raw_prices.append(val)
             except (ValueError, TypeError):
                 pass
         
-        # Determine if prices are in cents
+        # Detect cents mode:
+        # Prices in cents are typically large integers with no decimal part
+        # and the average is > 1000 (e.g. 17900c = 179₪ average)
+        # Actual shekel prices are smaller (50–750 typical for alcohol bottles)
+        # with optional decimals like 179.90
         avg_raw = sum(raw_prices) / len(raw_prices) if raw_prices else 0
-        use_cents = avg_raw > 1000
+        has_decimals = any(
+            str(p) != str(int(p)) for p in raw_prices
+        ) if raw_prices else False
+        # Likely cents: all integers AND avg > 1000
+        likely_cents = (avg_raw > 1000 and not has_decimals)
         
         products = []
         
@@ -112,10 +125,21 @@ class WooCommerceAPIScraper:
             raw_sale = prices_data.get("sale_price", "") or ""
             
             try:
-                if use_cents:
+                # Try cents conversion if heuristic indicates cents
+                if likely_cents:
                     price = float(raw_price) / 100
                     regular_price = float(raw_regular) / 100 if raw_regular else price
-                    sale_price = float(raw_sale) / 100 if raw_sale else None
+                    sale_price_val = float(raw_sale) / 100 if raw_sale else None
+                    # If cents conversion gives a realistic alcohol price, use it
+                    # Realistic range for a standard bottle: 20–5000₪
+                    if 15 <= price <= 5000:
+                        sale_price = sale_price_val
+                    else:
+                        # Fall back to shekels: the raw price was likely already in ₪
+                        # (e.g. premium whiskies >1200₪ that tripped the cents heuristic)
+                        price = float(raw_price)
+                        regular_price = float(raw_regular) if raw_regular else price
+                        sale_price = float(raw_sale) if raw_sale else None
                 else:
                     price = float(raw_price)
                     regular_price = float(raw_regular) if raw_regular else price
@@ -126,16 +150,8 @@ class WooCommerceAPIScraper:
             # Filter nonsense prices
             if price <= 0 or price < 5:
                 continue
-            
-            # Sanity check: a bottle of alcohol shouldn't cost 0.15₪ or 15,000₪
-            if use_cents and price > 5000:
+            if price > 5000:
                 continue
-            if not use_cents and price > 5000:
-                # Maybe it IS cents after all
-                price /= 100
-                regular_price /= 100
-                if sale_price:
-                    sale_price /= 100
             
             # Filter irrelevant products
             if not is_relevant_product(name, query, min_words=1):
@@ -418,29 +434,27 @@ class UnifiedScraper:
     """Master scraper - picks the right method per store."""
     
     # Store configurations
+    # Auto-generated from config.yaml — single source of truth
     STORE_CONFIGS = [
-        # (name, url, engine, search_pattern)
-        # API stores
-        ("הטורקי", "https://haturki.com", "haturki_api", None),
-        ("בנא משקאות", "https://www.banamashkaot.co.il", "woocommerce", None),
-        ("דרך היין", "https://www.wineroute.co.il", "woocommerce", None),
-        ("ארי משקאות", "https://www.ari-g.co.il", "woocommerce", None),
-        ("Liquor Store", "https://www.liquor-store.co.il", "woocommerce", None),
-        ("אלכוהום", "https://www.alcohome.co.il", "woocommerce", None),
-        ("משקאות המשמח", "https://www.hamesameach.co.il", "woocommerce", None),
-        ("Coffeco", "https://www.coffeco.co.il", "woocommerce", None),
-        ("Alcohol123", "https://www.alcohol123.co.il", "woocommerce", None),
-        ("בית היין", "https://www.winehouse.co.il", "woocommerce", None),
-        ("פאנקו", "https://www.paneco.co.il", "magento", None),
-        # HTML fallback stores
-        ("היבואן", "https://www.the-importer.co.il", "magento_html", None),
-        ("שר המשקאות", "https://www.mashkaot.co.il", "sar", None),
-        ("אליאסי משקאות", "https://www.eliasi.co.il", "prodbox_eliasi", None),
-        ("לגימה", "https://www.legima.co.il", "prodbox_legima", None),
-        ("Drinks4U", "https://www.drinks4u.co.il", "prodbox_drinks4u", None),
-        ("Wine & More", "https://www.wineandmore.co.il", "playwright_wineandmore", None),
-        ("בית המשקאות של אביב", "https://www.avivdrinks.co.il", "playwright_aviv", None),
-        ("מנו וינו", "https://www.manovino.co.il", "playwright_manovino", None),
+        ("הטורקי", "https://haturki.com", "haturki_api", "/search?q={query}"),
+        ("פאנקו", "https://www.paneco.co.il", "magento", "/?s={query}&post_type=product"),
+        ("בנא משקאות", "https://www.banamashkaot.co.il", "woocommerce", "/?s={query}&post_type=product"),
+        ("היבואן", "https://www.the-importer.co.il", "magento_html", "/search?q={query}"),
+        ("דרך היין", "https://www.wineroute.co.il", "woocommerce", "/?s={query}"),
+        ("שר המשקאות", "https://www.mashkaot.co.il", "sar", "/?s={query}&post_type=product"),
+        ("אליאסי משקאות", "https://www.eliasi.co.il", "prodbox_eliasi", "/?s={query}&post_type=product"),
+        ("ארי משקאות", "https://www.ari-g.co.il", "woocommerce", "/search/result/?q={query}"),
+        ("Liquor Store", "https://www.liquor-store.co.il", "woocommerce", "/?s={query}&post_type=product"),
+        ("אלכוהום", "https://www.alcohome.co.il", "woocommerce", "/?s={query}&post_type=product"),
+        ("משקאות המשמח", "https://www.hamesameach.co.il", "woocommerce", "/search/result/?q={query}"),
+        ("מנו וינו", "https://www.manovino.co.il", "playwright_manovino", "/search?q={query}"),
+        ("בית המשקאות של אביב", "https://www.avivdrinks.co.il", "playwright_aviv", "/search/result/?q={query}"),
+        ("Wine & More", "https://www.wineandmore.co.il", "playwright_wineandmore", "/search?q={query}"),
+        ("לגימה", "https://www.legima.co.il", "prodbox_legima", "/?s={query}&post_type=product"),
+        ("Coffeco", "https://www.coffeco.co.il", "woocommerce", "/search/result/?q={query}"),
+        ("Drinks4U", "https://www.drinks4u.co.il", "prodbox_drinks4u", "/?s={query}&post_type=product"),
+        ("Alcohol123", "https://www.alcohol123.co.il", "woocommerce", "/?s={query}&post_type=product"),
+        ("בית היין", "https://www.winehouse.co.il", "woocommerce", "/?s={query}&post_type=product"),
     ]
     
     @staticmethod

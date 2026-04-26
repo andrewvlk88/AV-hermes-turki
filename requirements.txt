@@ -8,3 +8,4 @@ rich>=13.0.0
 httpx>=0.26.0
 fake-useragent>=1.4.0
 playwright-stealth>=1.0.0
+filelock>=3.13.0

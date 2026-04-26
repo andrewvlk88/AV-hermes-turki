@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
+try:
+    from filelock import FileLock
+    FILELOCK_AVAILABLE = True
+except ImportError:
+    FILELOCK_AVAILABLE = False
+    FileLock = None
+
 from src.models import ProductPrice, PriceReport
 
 
@@ -74,6 +81,18 @@ def export_tracking_csv(
     
     mode = "a" if file_exists else "w"  # append if exists, write if new
     
+    # Use filelock if available to prevent data corruption from parallel runs
+    if FILELOCK_AVAILABLE:
+        lock_path = str(output_path) + ".lock"
+        with FileLock(lock_path):
+            _write_csv_rows(output_path, mode, headers, file_exists, report, search_query, date_str, time_str, weekday)
+    else:
+        _write_csv_rows(output_path, mode, headers, file_exists, report, search_query, date_str, time_str, weekday)
+
+
+def _write_csv_rows(output_path, mode, headers, file_exists, report, search_query, date_str, time_str, weekday):
+    """Actually write rows to CSV (called with or without filelock)."""
+    
     with open(output_path, mode, newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         
@@ -105,7 +124,7 @@ def export_tracking_csv(
                     savings_pct,
                     vol_val,
                     "✅" if entry.get("is_sale") else None,
-                    entry.get("url", "") or None,
+                    entry.get("url", ""),
                 ])
     
     action = "עודכן" if file_exists else "נוצר"

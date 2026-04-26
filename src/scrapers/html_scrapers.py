@@ -1,4 +1,5 @@
 """Store-specific HTML scrapers for stores without APIs."""
+import html
 import re
 from typing import List, Optional
 from bs4 import BeautifulSoup
@@ -50,7 +51,7 @@ class MagentoHTMLScraper:
                 logger.warning("MagentoHTMLScraper request failed for %s: %s", self.store.url, e)
                 return []
         
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(html.unescape(resp.text), "lxml")
         products = []
         
         # Magento 2: product items are in <li> or <div> with class="product-item"
@@ -147,7 +148,7 @@ class SarHascraper:
                 logger.warning("SarHascraper request failed for %s: %s", self.store.url, e)
                 return []
         
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(html.unescape(resp.text), "lxml")
         products = []
         
         # Find product boxes
@@ -241,7 +242,7 @@ class ProdBoxScraper:
                 logger.warning("ProdBoxScraper request failed for %s: %s", self.store.url, e)
                 return []
         
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(html.unescape(resp.text), "lxml")
         products = []
         
         # Find containers

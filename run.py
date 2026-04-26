@@ -319,18 +319,21 @@ def format_telegram(report: PriceReport) -> str:
 
 
 async def async_main(queries: List[str], output_dir: str = "data"):
+    """Run search for all queries. Returns the last PriceReport for --json output."""
+    last_report = None
     try:
         for query in queries:
-            print(f"\n{'='*50}")
-            print(f"🔎 *{query}*")
-            print(f"{'='*50}")
+            _print(f"\n{'='*50}")
+            _print(f"🔎 *{query}*")
+            _print(f"{'='*50}")
             
             # Search all stores
             all_prices = await search_all(query)
             
             # Build report
-            print(f"\n📊 בונים דוח...")
+            _print(f"\n📊 בונים דוח...")
             report = build_report(all_prices, query)
+            last_report = report
             
             # Save
             base = Path(output_dir)
@@ -352,8 +355,8 @@ async def async_main(queries: List[str], output_dir: str = "data"):
                     for d in report.deals_found:
                         f.write(f"  {d}\n")
             
-            print(f"📁 JSON: {json_path}")
-            print(f"📄 דוח: {txt_path}")
+            _print(f"📁 JSON: {json_path}")
+            _print(f"📄 דוח: {txt_path}")
             
             # CSV export
             all_products = []
@@ -364,21 +367,50 @@ async def async_main(queries: List[str], output_dir: str = "data"):
                 csv_paths = bulk_export(all_prices, report, output_dir, query=query)
             
             # Telegram format
-            print(f"\n{format_telegram(report)}")
+            _print(f"\n{format_telegram(report)}")
     finally:
         # Always close Playwright browser to prevent zombie Chromium processes
         await PlaywrightEngine.close()
+    
+    return last_report
 
+
+import argparse
+import sys
+
+SILENT = False
+
+def _print(*args, **kwargs):
+    """Print that respects --silent mode (redirects to stderr when silent)."""
+    if SILENT:
+        print(*args, file=sys.stderr, **kwargs)
+    else:
+        print(*args, **kwargs)
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(description="טורקי פרייס אינטליג׳נס")
     parser.add_argument("queries", nargs="+", help='מוצרים: "ג\'ק דניאלס" "וודקה אבסולוט"')
     parser.add_argument("--output", "-o", default="data")
+    parser.add_argument("--json", action="store_true", help="Output JSON to stdout (implies --silent)")
+    parser.add_argument("--silent", action="store_true", help="Suppress progress output to stdout")
+    parser.add_argument("--agent-mode", action="store_true", help="Alias for --json --silent (for Agent consumption)")
     
     args = parser.parse_args()
-    asyncio.run(async_main(args.queries, args.output))
-
+    
+    if args.agent_mode:
+        args.json = True
+        args.silent = True
+    if args.json:
+        args.silent = True
+    
+    global SILENT
+    SILENT = args.silent
+    
+    report = asyncio.run(async_main(args.queries, args.output))
+    
+    if args.json:
+        import json
+        print(json.dumps(report.model_dump(), ensure_ascii=False, indent=2))
 
 if __name__ == "__main__":
     main()
