@@ -5,6 +5,7 @@ These stores need JS because they load products dynamically
 or require interaction (age verification, etc.).
 """
 import asyncio
+import urllib.parse
 import re
 from typing import List, Optional
 
@@ -118,7 +119,7 @@ class GenericPlaywrightScraper:
         """Search using Playwright browser."""
         search_patterns = self.config.get(
             "search_patterns",
-            ["/search?q={query}", "/?s={query}&post_type=product", 
+            ["/Search/?q={query}", "/?s={query}&post_type=product", 
              "/search/result/?q={query}", "/catalogsearch/result/?q={query}"]
         )
         
@@ -128,7 +129,7 @@ class GenericPlaywrightScraper:
         products = []
         try:
             for pattern in search_patterns:
-                search_url = self.store.url.rstrip("/") + pattern.replace("{query}", query.replace(" ", "+"))
+                search_url = self.store.url.rstrip("/") + pattern.replace("{query}", urllib.parse.quote(query))
                 
                 page = await context.new_page()
                 try:
@@ -233,22 +234,24 @@ class GenericPlaywrightScraper:
                 continue
         
         if products:
-            return products[:10]
+            return products
         
         # Generic: look for product items
         containers = soup.find_all(["div", "li", "article"], 
                                    class_=re.compile(r"(product|item|card)", re.I))
         
-        for c in containers[:15]:
-            name_el = c.find(["h2", "h3", "h4", "a", "span", "strong"])
-            if not name_el:
-                continue
-            name = name_el.get_text(strip=True)
-            if not name or len(name) < 3:
+        for c in containers:
+            name = ""
+            for el in c.find_all(["h2", "h3", "h4", "a", "span", "strong"]):
+                n = el.get_text(strip=True)
+                if len(n) >= 3:
+                    name = n
+                    break
+            if not name:
                 continue
             
             c_html = str(c)
-            prices = re.findall(r'(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח)', c_html)
+            prices = re.findall(r'(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח)', c.get_text(separator=" "))
             if not prices:
                 # Check data-price attribute
                 data_prices = re.findall(r'data-price[=]["\']?(\d+\.?\d*)', c_html)
@@ -278,7 +281,7 @@ class GenericPlaywrightScraper:
                 product_url=url,
             ))
         
-        return products[:10]
+        return products
 
 
 class AvivDrinksScraper(GenericPlaywrightScraper):
@@ -309,7 +312,7 @@ class ManoVinoScraper(GenericPlaywrightScraper):
         super().__init__(store, {
             "timeout": 15000,
             "search_patterns": [
-                "/search?q={query}",
+                "/Search/?q={query}",
                 "/collections/search?q={query}",
                 "/collections/all/{query}",
             ]
@@ -328,7 +331,7 @@ class WineAndMoreScraper(GenericPlaywrightScraper):
         super().__init__(store, {
             "timeout": 20000,
             "search_patterns": [
-                "/search?q={query}",
+                "/Search/?q={query}",
             ]
         })
     
@@ -399,13 +402,13 @@ class WineAndMoreScraper(GenericPlaywrightScraper):
                 continue
         
         if products:
-            return products[:10]
+            return products
         
         # Wine & More specific: layout_list_item containers with title + price
         containers = soup.find_all(["div", "li", "article"],
             class_=re.compile(r"(layout_list_item|ProductItem|product_item|item.*box)", re.I))
         
-        for c in containers[:15]:
+        for c in containers:
             # Find title — usually in an <a> inside .title or .name or .item-name
             title_el = (c.find(class_=re.compile(r"(title|name|item-name)", re.I))
                        or c.find(["h2", "h3", "h4", "a"]))
@@ -422,7 +425,7 @@ class WineAndMoreScraper(GenericPlaywrightScraper):
             
             # Find price — look for price_item_x or .price classes or ₪ symbol
             c_html = str(c)
-            prices = re.findall(r'(\d[\d,]*\.?\d*)\s*(?:₪|ש["\']ח)', c_html)
+            prices = re.findall(r'(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח)', c.get_text(separator=" "))
             if not prices:
                 data_prices = re.findall(r'data-price[=\s"]+(\d+\.?\d*)', c_html)
                 prices = data_prices if data_prices else []
@@ -462,7 +465,7 @@ class WineAndMoreScraper(GenericPlaywrightScraper):
         if not products:
             products = super()._extract_products(html, query)
         
-        return products[:10]
+        return products
 
 
 class PwScraperFactory:

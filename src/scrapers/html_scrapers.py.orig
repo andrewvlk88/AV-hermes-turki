@@ -1,8 +1,6 @@
 """Store-specific HTML scrapers for stores without APIs."""
 import html
 import re
-import asyncio
-import urllib.parse
 from typing import List, Optional
 from bs4 import BeautifulSoup
 import httpx
@@ -24,51 +22,6 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-async def _fetch_html(url: str) -> Optional[str]:
-    """Fetch HTML using Playwright if available to bypass Cloudflare/Age popups."""
-    try:
-        from src.scrapers.playwright_scrapers import PlaywrightEngine, _create_context
-        browser = await PlaywrightEngine.get_browser()
-        context = await _create_context(browser)
-        page = await context.new_page()
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            # Bypass age popup via JS click
-            try:
-                await page.evaluate('''() => {
-                    // Click
-                    const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
-                    for (const el of document.querySelectorAll('a, button, input')) {
-                        const t = el.textContent.trim();
-                        if (keywords.some(k => t.includes(k))) { el.click(); break; }
-                    }
-                    // Remove
-                    const selectors = [
-                        '[id*="age_popup"]', '[id*="popup18plus"]', '[id*="wrapper_age"]', '[id*="active_popup"]',
-                        '.age-overlay', '.modal-backdrop', '.modal-overlay', '.popup-overlay'
-                    ];
-                    selectors.forEach(sel => {
-                        document.querySelectorAll(sel).forEach(el => el.remove());
-                    });
-                    document.body.classList.remove('modal-open');
-                    document.body.style.overflow = 'auto';
-                }''')
-                await asyncio.sleep(1)
-            except: pass
-            await asyncio.sleep(2)
-            return await page.content()
-        except Exception as e:
-            logger.warning(f"Playwright fetch failed for {url}: {e}")
-            return None
-        finally:
-            await page.close()
-    except ImportError:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False) as client:
-            try:
-                resp = await client.get(url, headers={"User-Agent": _get_ua()})
-                return resp.text if resp.status_code == 200 else None
-            except: return None
-
 
 class MagentoHTMLScraper:
     """Scrapes Magento 2 stores from HTML search results.
@@ -82,16 +35,23 @@ class MagentoHTMLScraper:
     
     async def search(self, query: str) -> List[ProductPrice]:
         """Search via HTML."""
-        search_url = f"{self.store.url}/search?q={urllib.parse.quote(query)}&limit=20"
+        search_url = f"{self.store.url}/search?q={query}&limit=20"
         headers = {
             "User-Agent": _get_ua(),
             "Accept": "text/html",
             "Accept-Language": "he-IL,he;q=0.9",
         }
         
-        html_text = await _fetch_html(search_url)
-        if not html_text: return []
-        soup = BeautifulSoup(html.unescape(html_text), "lxml")
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            try:
+                resp = await client.get(search_url, headers=headers)
+                if resp.status_code != 200:
+                    return []
+            except Exception as e:
+                logger.warning("MagentoHTMLScraper request failed for %s: %s", self.store.url, e)
+                return []
+        
+        soup = BeautifulSoup(html.unescape(resp.text), "lxml")
         products = []
         
         # Magento 2: product items are in <li> or <div> with class="product-item"
@@ -156,7 +116,7 @@ class MagentoHTMLScraper:
                 product_url=href,
             ))
         
-        return products
+        return products[:10]
 
 
 class SarHascraper:
@@ -173,15 +133,22 @@ class SarHascraper:
         self.store = store
     
     async def search(self, query: str) -> List[ProductPrice]:
-        search_url = f"{self.store.url}/?s={urllib.parse.quote(query)}&post_type=product"
+        search_url = f"{self.store.url}/?s={query}&post_type=product"
         headers = {
             "User-Agent": _get_ua(),
             "Accept": "text/html",
         }
         
-        html_text = await _fetch_html(search_url)
-        if not html_text: return []
-        soup = BeautifulSoup(html.unescape(html_text), "lxml")
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            try:
+                resp = await client.get(search_url, headers=headers)
+                if resp.status_code != 200:
+                    return []
+            except Exception as e:
+                logger.warning("SarHascraper request failed for %s: %s", self.store.url, e)
+                return []
+        
+        soup = BeautifulSoup(html.unescape(resp.text), "lxml")
         products = []
         
         # Find product boxes
@@ -217,7 +184,7 @@ class SarHascraper:
             
             if not regular_price and not sale_price:
                 # Fallback to any price in box
-                box_html = box.get_text(separator=" ")
+                box_html = str(box)
                 prices = re.findall(r'(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח)', box_html)
                 if prices:
                     regular_price = float(prices[0].replace(",", ""))
@@ -237,7 +204,7 @@ class SarHascraper:
                 is_on_sale=(sale_price is not None and sale_price < regular_price),
             ))
         
-        return products
+        return products[:10]
 
 
 class ProdBoxScraper:
@@ -260,21 +227,28 @@ class ProdBoxScraper:
         self.search_pattern = search_pattern
     
     async def search(self, query: str) -> List[ProductPrice]:
-        search_url = self.store.url.rstrip("/") + self.search_pattern.replace("{query}", urllib.parse.quote(query))
+        search_url = self.store.url.rstrip("/") + self.search_pattern.replace("{query}", query)
         headers = {
             "User-Agent": _get_ua(),
             "Accept": "text/html",
         }
         
-        html_text = await _fetch_html(search_url)
-        if not html_text: return []
-        soup = BeautifulSoup(html.unescape(html_text), "lxml")
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            try:
+                resp = await client.get(search_url, headers=headers)
+                if resp.status_code != 200:
+                    return []
+            except Exception as e:
+                logger.warning("ProdBoxScraper request failed for %s: %s", self.store.url, e)
+                return []
+        
+        soup = BeautifulSoup(html.unescape(resp.text), "lxml")
         products = []
         
         # Find containers
         containers = soup.find_all(["div", "li"], class_=re.compile(self.container_class, re.I))
         
-        for c in containers:
+        for c in containers[:15]:
             # Title
             title_el = c.find(class_=re.compile(self.title_class, re.I))
             name = title_el.get_text(strip=True)[:100] if title_el else ""
@@ -293,8 +267,8 @@ class ProdBoxScraper:
             
             # Price
             price_el = c.find(class_=re.compile(self.price_class, re.I))
-            price_text = price_el.get_text(separator=" ") if price_el else c.get_text(separator=" ")
-            prices = re.findall(r'(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח)', price_text)
+            c_html = str(price_el) if price_el else str(c)
+            prices = re.findall(r'(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח)', c_html)
             
             if not prices:
                 continue
@@ -318,7 +292,7 @@ class ProdBoxScraper:
                 product_url=url,
             ))
         
-        return products
+        return products[:10]
 
 
 class StoreMatcher:

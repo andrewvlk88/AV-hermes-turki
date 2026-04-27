@@ -1,147 +1,67 @@
 # Turkí Price Intelligence 🦃
 
-**השוואת מחירי אלכוהול בישראל — בזמן אמת, על פני 19 חנויות.**
+מנוע פייתון להשוואת מחירי אלכוהול ב-19 חנויות ישראליות, עם דגש על 'הטורקי' כחנות Reference (השוואה ובדיקת כדאיות מבצעים מולם). המערכת רצה במקביל (Async) על כל החנויות ומפיקה דוחות JSON, Text ו-CSV.
 
-מנוע חיפוש והשוואת מחירים אוטומטי שרץ מהטרמינל, סורק 19 חנויות אלכוהול ישראליות במקביל, ומחזיר לך דוח מחירים מאוחד — עם זיהוי המבצע הכי משתלם.
+## תכונות מרכזיות
+- **Concurrency & Speed**: סריקה של 19 חנויות בו-זמנית בעזרת `asyncio.gather`. רוב החיפושים מסתיימים תוך 5-15 שניות.
+- **REST APIs First**: זיהוי אוטומטי ושימוש ב-APIs נסתרים של אתרי החנויות (WooCommerce, Magento) במקום Web Scraping איטי.
+- **Playwright Fallback**: חנויות שחוסמות גישה או דורשות אימות גיל (פופאפים של "אני מעל 18") מטופלות אוטומטית בעזרת דפדפן Headless Chromium וסקריפטים עוקפי-אימות גיל.
+- **Price Heuristics Corrected**: תמיכה מושלמת במחירי אגורות/סנטים מול שקלים בעזרת קריאת ה-`currency_minor_unit` המקורי מ-WooCommerce.
+- **Smart Product Matching**: פילטרים מתקדמים לניקוי שמות, חילוץ נפחים, והתאמה מדויקת בין מוצרים שנקראים אחרת בחנויות שונות.
 
----
-
-## 🎯 מה זה עושה?
-
-מזינים שם של מוצר (למשל `"ג'ק דניאלס"` או `"וודקה אבסולוט"`) והכלי:
-
-1. **סורק 19 חנויות במקביל**
-2. **מזהה מחירים תואמים** (מתמודד עם שמות שונים לאותו מוצר, נ"סים שונים)
-3. **מדווח מה זול יותר** — והפער מול חנות הייחוס (הטורקי)
-4. **שומר CSV למעקב לאורך זמן** — אפשר לראות איך המחירים משתנים
-5. **מייצא JSON** לעיבוד נוסף
-
-**דוגמה לפלט:**
-```
-📊 *טורקי פרייס אינטליג׳נס*
-🔎 *ג'ק דניאלס*
-
-5/19 חנויות הגיבו
-
-🏷️ וויסקי ג'ק דניאלס - 700 מ"ל
-   הטורקי:      115₪
-   בנא משקאות:  118₪
-   Alcohol123:   135₪
-   Wine & More:  169₪ (1 ליטר)
-   
-   👇 הכי זול: 115₪ ב-הטורקי
-```
-
----
-
-## 🏪 החניות המכוסות
-
-| # | חנות | פלטפורמה |
-|---|------|----------|
-| 1 | **הטורקי** 🏆 (ייחוס) | API ישיר |
-| 2 | **פאנקו** | Magento API |
-| 3 | **בנא משקאות** | WooCommerce |
-| 4 | **היבואן** | Magento HTML |
-| 5 | **דרך היין** | WooCommerce |
-| 6 | **שר המשקאות** | HTML Scraper |
-| 7 | **אליאסי משקאות** | HTML Scraper |
-| 8 | **ארי משקאות** | WooCommerce |
-| 9 | **Liquor Store** | WooCommerce |
-| 10 | **אלכוהום** | WooCommerce |
-| 11 | **משקאות המשמח** | WooCommerce |
-| 12 | **מנו וינו** | Playwright (Shopify) |
-| 13 | **בית המשקאות של אביב** | Playwright |
-| 14 | **Wine & More** | Playwright |
-| 15 | **לגימה** | HTML Scraper |
-| 16 | **Coffeco** | WooCommerce |
-| 17 | **Drinks4U** | HTML Scraper |
-| 18 | **Alcohol123** | WooCommerce |
-| 19 | **בית היין** | WooCommerce |
-
----
-
-## ⚙️ ארכיטקטורת מנועי החיפוש
-
-4 שכבות שונות שמבטיחות כיסוי מירבי:
-
-| שכבה | טכנולוגיה | מהירות | חנויות |
-|------|-----------|--------|--------|
-| **API ישיר** | HTTPS + JSON | ~200ms | הטורקי |
-| **WooCommerce Store API** | `rest_route=/wc/store/products` | 2-5s במקביל | 8 חנויות |
-| **Magento API/HTML** | REST API / BeautifulSoup | 2-3s | פאנקו, היבואן |
-| **HTML Scrapers** | BeautifulSoup + regex | ~3s | 5 חנויות |
-| **Playwright (Headless)** | Chromium אמיתי | ~10s | מנו וינו, אביב, Wine & More |
-
----
-
-## 🚀 שימוש מהיר
-
+## התקנה
 ```bash
-# חיפוש בודד
-./venv/bin/python3 run.py "ג'ק דניאלס"
-
-# רשימת מוצרים
-./venv/bin/python3 run.py "ג'ק דניאלס" "וודקה אבסולוט" "יברמה"
-
-# פלט: JSON + TXT + CSV בספריית data/
+git clone <repository_url>
+cd turk-price-intelligence
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
 ```
 
----
+## הרצה בסיסית
 
-## 📁 פלט
+⚠️ **חובה להשתמש ב-venv!** 
+```bash
+# חיפוש מוצר יחיד
+./venv/bin/python3 run.py "וודקה אבסולוט"
 
-| פורמט | תיאור |
-|-------|-------|
-| `data/*.json` | פלט מלא למכונה |
-| `data/*.txt` | דוח קריא לבן אדם |
-| `data/turk_products_*.csv` | טבלת מוצרים (utf-8-sig, תואם Excel) |
-| `data/price_tracking_*.csv` | מעקב מחירים לאורך זמן (מצטבר, append) |
-
----
-
-## 🏗️ מבנה הפרויקט
-
+# חיפוש מספר מוצרים ברצף
+./venv/bin/python3 run.py "ג'ק דניאלס" "וודקה אבסולוט"
 ```
+
+## Agent Mode (עבור כלי AI / סקריפטים אוטומטיים)
+לייצור פלט נקי המשמש מערכות אחרות (הדפסת JSON בלבד והשתקת הלוגים ל-stdout):
+```bash
+./venv/bin/python3 run.py "בלוגה" --agent-mode
+```
+כל הקבצים יישמרו גם בתיקיית `data/`:
+- `*.json`: נתונים גולמיים ומלאים.
+- `*.txt`: דוח קריא עם אימוג'ים ומבצעים מודגשים.
+- `*.csv`: דוח מעקב מחירים לאורך זמן לכל מוצר (Append mode).
+- `turk_products_*.csv`: דוח בפורמט מיוחד השוואתי עבור בעלי החנות 'הטורקי'.
+
+## הארכיטקטורה
+1. **API Scrapers** (הכי מהיר: ~200ms): הטורקי, WooCommerce (כ-9 חנויות שונות), פאנקו (Magento API).
+2. **HTML Scrapers**: שר המשקאות, אליאסי, לגימה, Drinks4U. משתמשים ב-`httpx` ובמידת הצורך עוברים עצמאית ל-Playwright כדי לעקוף Cloudflare / פופאפ גיל.
+3. **Playwright Scrapers** (~10-15s): חנויות מורכבות יותר שדורשות JavaScript Rendering כמו Wine and More.
+
+## מבנה הפרויקט
+```text
 turk-price-intelligence/
-├── run.py                 ← נקודת כניסה
-├── config.yaml            ← 19 חנויות + הגדרות
-├── requirements.txt
+├── run.py                              ← CLI Entry point (--agent-mode)
+├── config.yaml                         ← 19 חנויות + הגדרות מנועים
+├── requirements.txt                    
 ├── src/
-│   ├── models.py          ← Pydantic: ProductPrice, Store, PriceReport
+│   ├── models.py                       ← Pydantic: ProductPrice, Store, PriceReport
 │   ├── scrapers/
-│   │   ├── api_scrapers.py         ← Haturki API (יחוס)
-│   │   ├── unified_scraper.py      ← WooCommerce + Magento
-│   │   ├── html_scrapers.py        ← BeautifulSoup scrapers
-│   │   └── playwright_scrapers.py  ← Chromium Headless
-│   ├── agents/
-│   │   ├── searcher.py             ← חיפוש
-│   │   ├── extractor.py            ← חילוץ מידע
-│   │   └── analyzer.py             ← ניתוח והשוואת מחירים
+│   │   ├── unified_scraper.py          ← מנוע החלוקה הראשי + WooCommerce Logic
+│   │   ├── api_scrapers.py             ← API הטורקי ישירות
+│   │   ├── html_scrapers.py            ← HTML Fallbacks + Playwright Stealth
+│   │   └── playwright_scrapers.py      ← מחלץ נתונים בעזרת Chromium מנוהל
 │   ├── export/
-│   │   └── csv_export.py           ← ייצוא CSV בעברית
+│   │   └── csv_export.py               ← מנגנון שמירה בטוח (FileLock) לאקסל עברי (utf-8-sig)
 │   └── utils/
-│       └── filters.py              ← ניקוי והתאמת מוצרים
-├── tests/                          ← 8 קבצי בדיקות
-└── data/                           ← תפוקת ריצות
+│       └── filters.py                  ← Smart Matching (Volumes & Names)
+└── data/                               ← (נוצר אוטומטית) הפלטים נשמרים כאן
 ```
-
----
-
-## ⚠️ הערות טכניות
-
-- **חובה להריץ מתוך `venv`** — Pydantic v2 מותקן רק שם (`./venv/bin/python3 run.py`)
-- **CSV בעברית** — utf-8-sig, נפתח נכון ב-Excel
-- **מחירי WooCommerce** — חנויות ישראליות שומרות מחירים באגורות או שקלים; היוריסטיקה אוטומטית מזהה
-- **Playwright** — מטפל אוטומטית ב-age verification popups (חובה בארץ לאלכוהול)
-
----
-
-## 📊 מעקב לאורך זמן
-
-כל ריצה מוסיפה שורה ל-`data/price_tracking_*.csv` עם timestamp. אפשר לעקוב אחרי מגמות מחירים לאורך ימים/שבועות.
-
----
-
-## 📜 רישיון
-
-MIT

@@ -2,6 +2,7 @@
 import re
 import html
 import json
+import asyncio
 from typing import List, Optional
 from bs4 import BeautifulSoup
 import httpx
@@ -67,45 +68,8 @@ class WooCommerceAPIScraper:
         return []
     
     def _parse_products(self, data: list, query: str) -> List[ProductPrice]:
-        """Parse WooCommerce Store API response.
-        
-        Israeli WooCommerce stores inconsistently store prices:
-        - Some use cents (24900 = 249.00₪) — integer > 1000, should divide by 100
-        - Some use actual shekels (168 = 168₪) — integer < 1000, use as-is
-        - Some use agorot (1590 = 15.90₪) — rare, covered by post-filter
-        - Some use shekels with decimal (179.90) — already in ₪
-        
-        Two-pass heuristic:
-        1. Check if raw prices are integers (no decimal point) AND avg > 1000 → likely cents
-        2. After conversion, verify alcohol bottle price is in sane range (20–5000₪).
-           If conversion yields unrealistic value (< 15₪ or > 5000₪), fall back to original.
-        """
+        """Parse WooCommerce Store API response using currency_minor_unit."""
         NOISE_WORDS = ["משלוח", "לתקנון", "מבצע", "חינם", "קופון", "שובר"]
-        
-        # First pass: collect raw prices and detect format
-        raw_prices = []
-        for item in data[:10]:
-            prices_data = item.get("prices", {})
-            raw = prices_data.get("price", "0") or "0"
-            try:
-                val = float(raw)
-                if val > 0:
-                    raw_prices.append(val)
-            except (ValueError, TypeError):
-                pass
-        
-        # Detect cents mode:
-        # Prices in cents are typically large integers with no decimal part
-        # and the average is > 1000 (e.g. 17900c = 179₪ average)
-        # Actual shekel prices are smaller (50–750 typical for alcohol bottles)
-        # with optional decimals like 179.90
-        avg_raw = sum(raw_prices) / len(raw_prices) if raw_prices else 0
-        has_decimals = any(
-            str(p) != str(int(p)) for p in raw_prices
-        ) if raw_prices else False
-        # Likely cents: all integers AND avg > 1000
-        likely_cents = (avg_raw > 1000 and not has_decimals)
-        
         products = []
         
         for item in data[:10]:
@@ -123,27 +87,13 @@ class WooCommerceAPIScraper:
             raw_price = prices_data.get("price", "0") or "0"
             raw_regular = prices_data.get("regular_price", "0") or "0"
             raw_sale = prices_data.get("sale_price", "") or ""
+            minor_unit = prices_data.get("currency_minor_unit", 0)
             
             try:
-                # Try cents conversion if heuristic indicates cents
-                if likely_cents:
-                    price = float(raw_price) / 100
-                    regular_price = float(raw_regular) / 100 if raw_regular else price
-                    sale_price_val = float(raw_sale) / 100 if raw_sale else None
-                    # If cents conversion gives a realistic alcohol price, use it
-                    # Realistic range for a standard bottle: 20–5000₪
-                    if 15 <= price <= 5000:
-                        sale_price = sale_price_val
-                    else:
-                        # Fall back to shekels: the raw price was likely already in ₪
-                        # (e.g. premium whiskies >1200₪ that tripped the cents heuristic)
-                        price = float(raw_price)
-                        regular_price = float(raw_regular) if raw_regular else price
-                        sale_price = float(raw_sale) if raw_sale else None
-                else:
-                    price = float(raw_price)
-                    regular_price = float(raw_regular) if raw_regular else price
-                    sale_price = float(raw_sale) if raw_sale else None
+                divisor = 10 ** int(minor_unit)
+                price = float(raw_price) / divisor
+                regular_price = float(raw_regular) / divisor if raw_regular else price
+                sale_price = float(raw_sale) / divisor if raw_sale else None
             except (ValueError, TypeError):
                 continue
             
@@ -437,9 +387,9 @@ class UnifiedScraper:
     # Auto-generated from config.yaml — single source of truth
     STORE_CONFIGS = [
         ("הטורקי", "https://haturki.com", "haturki_api", "/search?q={query}"),
-        ("פאנקו", "https://www.paneco.co.il", "magento", "/?s={query}&post_type=product"),
+        ("פאנקו", "https://www.paneco.co.il", "playwright", "/catalogsearch/result/?q={query}"),
         ("בנא משקאות", "https://www.banamashkaot.co.il", "woocommerce", "/?s={query}&post_type=product"),
-        ("היבואן", "https://www.the-importer.co.il", "magento_html", "/search?q={query}"),
+        ("היבואן", "https://www.the-importer.co.il", "playwright", "/catalogsearch/result/?q={query}"),
         ("דרך היין", "https://www.wineroute.co.il", "woocommerce", "/?s={query}"),
         ("שר המשקאות", "https://www.mashkaot.co.il", "sar", "/?s={query}&post_type=product"),
         ("אליאסי משקאות", "https://www.eliasi.co.il", "prodbox_eliasi", "/?s={query}&post_type=product"),
@@ -516,6 +466,7 @@ class UnifiedScraper:
         triggering WAF/DDoS protections on store servers.
         """
         all_prices = {}
+        tasks = []
         semaphore = asyncio.Semaphore(3)
         
         async def search_with_limit(name, scraper, query):
@@ -533,7 +484,6 @@ class UnifiedScraper:
             tasks.append((name, search_with_limit(name, scraper, query)))
         
         # Run all searches in parallel (limited to 3 concurrent)
-        import asyncio
         results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
         
         for (name, _), result in zip(tasks, results):
