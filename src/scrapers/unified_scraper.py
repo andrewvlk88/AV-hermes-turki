@@ -3,6 +3,7 @@ import re
 import html
 import json
 import asyncio
+from urllib.parse import quote
 from typing import List, Optional
 from bs4 import BeautifulSoup
 import httpx
@@ -50,10 +51,11 @@ class WooCommerceAPIScraper:
     
     async def search(self, query: str) -> List[ProductPrice]:
         """Search products via WooCommerce Store API."""
-        search_url = f"{self.store.url}/?rest_route=/wc/store/products&search={query}&per_page=10"
-        api_url = f"{self.store.url}/wp-json/wc/store/products?search={query}&per_page=10"
+        query_encoded = quote(query)
+        search_url = f"{self.store.url}/?rest_route=/wc/store/products&search={query_encoded}&per_page=10"
+        api_url = f"{self.store.url}/wp-json/wc/store/products?search={query_encoded}&per_page=10"
         
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False) as client:
             for url in [search_url, api_url]:
                 try:
                     resp = await client.get(url, headers=BASE_HEADERS)
@@ -175,7 +177,7 @@ class MagentoAPIScraper:
     
     async def search(self, query: str) -> List[ProductPrice]:
         """Search via Magento REST API."""
-        query_encoded = query.replace(" ", "+")
+        query_encoded = quote(query)
         search_url = (
             f"{self.store.url}/rest/default/V1/products"
             f"?searchCriteria[filterGroups][0][filters][0][field]=name"
@@ -183,7 +185,7 @@ class MagentoAPIScraper:
             f"&searchCriteria[pageSize]=10"
         )
         
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False) as client:
             try:
                 resp = await client.get(search_url, headers=BASE_HEADERS)
                 if resp.status_code != 200:
@@ -277,11 +279,11 @@ class HTMLFallbackScraper:
             "Accept-Language": "he-IL,he;q=0.9",
         }
         
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False) as client:
             for pattern in patterns_to_try:
                 if not pattern:
                     continue
-                search_url = self.store.url.rstrip("/") + pattern.replace("{query}", query.replace(" ", "+"))
+                search_url = self.store.url.rstrip("/") + pattern.replace("{query}", quote(query))
                 try:
                     resp = await client.get(search_url, headers=headers)
                     if resp.status_code == 200 and len(resp.text) > 500:
@@ -498,23 +500,10 @@ class UnifiedScraper:
                     p.product_name = clean_product_name(p.product_name)
                     # Filter bogus prices
                     best_price = p.sale_price or p.regular_price
-                    if best_price and is_bogus_price(best_price, p.product_name):
-                        continue
-                    # Filter irrelevant products
-                    if not is_relevant_product(p.product_name, query, min_words=1):
-                        continue
-                    cleaned_results.append(p)
-                
+                    if best_price and not is_bogus_price(best_price, p.product_name):
+                        cleaned_results.append(p)
                 all_prices[name] = cleaned_results
                 if progress_callback:
-                    count = len(cleaned_results)
-                    if count > 0:
-                        best = cleaned_results[0]
-                        price = best.sale_price or best.regular_price
-                        if progress_callback:
-                            progress_callback(name, count, f"✅ {best.product_name[:40]}: {price:.0f}₪")
-                    else:
-                        if progress_callback:
-                            progress_callback(name, 0, "❌ לא נמצאו מוצרים")
-        
+                    progress_callback(name, len(cleaned_results), "✅")
+                    
         return all_prices

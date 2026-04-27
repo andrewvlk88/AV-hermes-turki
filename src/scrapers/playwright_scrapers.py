@@ -79,6 +79,7 @@ class PlaywrightEngine:
 async def _create_context(browser):
     """Create a context with stealth settings."""
     context = await browser.new_context(
+        ignore_https_errors=True,
         user_agent=_get_ua(),
         locale="he-IL",
         timezone_id="Asia/Jerusalem",
@@ -175,7 +176,7 @@ class GenericPlaywrightScraper:
                         logger.warning("Age verification handling failed: %s", e)
                     
                     # Wait a bit more for lazy content
-                    await page.wait_for_load_state("networkidle", timeout=5000)
+                    await page.wait_for_load_state("networkidle", timeout=self.timeout)
                     await asyncio.sleep(1)
                     
                     html = await page.content()

@@ -46,10 +46,10 @@ stores:
   - id: 6
     name: "עולם היין"
     url: "https://www.olamhayain.co.il"
-    search_path: ""
+    search_path: "/?s={query}&post_type=product"
     type: "dynamic"
-    platform: "?"
-    note: "❌ לא נגיש - ConnectError"
+    platform: "WooCommerce"
+    note: "בדיקת חיבור מחודשת לאחר עדכון SSL/Encoding"
 
   - id: 7
     name: "שר המשקאות"

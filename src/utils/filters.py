@@ -23,7 +23,7 @@ MINI_KEYWORDS = {
 # Keywords indicating non-alcohol accessories that should be filtered out
 ACCESORY_KEYWORDS = {
     "כוסות", "כוס", "שוט", "סט ", "מארז כוס", "בקבוקון", "מדיח",
-    "כוסית", "מתנה", "מזיגה", "פקק", "מפתח", "מגן", "אחסון",
+    "כוסית", "מתנה", "מזיגה", "פקק", "מפתח", "מגן", "אחסון", "קופסא", "מארז",
     "glasses", "glass", "shot", "set ", "opener", "gift",
 }
 
