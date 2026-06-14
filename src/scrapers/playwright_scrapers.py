@@ -125,7 +125,14 @@ class GenericPlaywrightScraper:
         )
         
         browser = await PlaywrightEngine.get_browser()
-        context = await _create_context(browser)
+        # Use a persistent user data directory to save session state (cookies/local storage)
+        context = await browser.launch_persistent_context(
+            user_data_dir="./data/playwright_sessions",
+            user_agent=_get_ua(),
+            locale="he-IL",
+            timezone_id="Asia/Jerusalem",
+            viewport={"width": 1920, "height": 1080},
+        )
         
         products = []
         try:
