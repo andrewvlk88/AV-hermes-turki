@@ -1,6 +1,9 @@
 """Playwright-based scrapers for JS-heavy Israeli alcohol stores.
 
-Uses headless Chromium to render pages with JavaScript.
+Uses CloakBrowser (stealth Chromium with 58 C++ source-level patches) to bypass
+Cloudflare, reCAPTCHA, and bot detection. Falls back to regular Playwright if
+CloakBrowser is unavailable.
+
 These stores need JS because they load products dynamically
 or require interaction (age verification, etc.).
 """
@@ -14,6 +17,13 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+
+# CloakBrowser — stealth Chromium with C++ fingerprint patches
+try:
+    from cloakbrowser import launch_persistent_context_async, launch_async
+    CLOAK_AVAILABLE = True
+except ImportError:
+    CLOAK_AVAILABLE = False
 
 try:
     from playwright_stealth import stealth_async
@@ -40,15 +50,16 @@ logger = get_logger(__name__)
 
 
 class PlaywrightEngine:
-    """Shared Playwright browser pool."""
+    """Shared browser pool — prefers CloakBrowser, falls back to Playwright."""
     
     _instance = None
     _browser = None
     _playwright = None
+    _use_cloak = CLOAK_AVAILABLE
     
     @classmethod
     async def get_browser(cls):
-        """Get or create shared browser instance."""
+        """Get or create shared browser instance (Playwright fallback only)."""
         if cls._browser and cls._browser.is_connected():
             return cls._browser
         
@@ -77,7 +88,7 @@ class PlaywrightEngine:
 
 
 async def _create_context(browser):
-    """Create a context with stealth settings."""
+    """Create a context with stealth settings (Playwright fallback only)."""
     context = await browser.new_context(
         ignore_https_errors=True,
         user_agent=_get_ua(),
@@ -85,13 +96,11 @@ async def _create_context(browser):
         timezone_id="Asia/Jerusalem",
         viewport={"width": 1920, "height": 1080},
     )
-    # Apply playwright-stealth if available (far more comprehensive than manual scripts)
     if STEALTH_AVAILABLE:
         page = await context.new_page()
         await stealth_async(page)
         await page.close()
     else:
-        # Fallback: hide automation hints manually
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             Object.defineProperty(navigator, 'plugins', { 
@@ -104,6 +113,27 @@ async def _create_context(browser):
     return context
 
 
+async def _create_cloak_context(store_name: str = None):
+    """Create a CloakBrowser context with stealth.
+    
+    Uses launch_async (non-persistent) to avoid cookie/session interference
+    between stores. Persistent sessions caused Paneco to return wrong results
+    (cached cocktail pages instead of actual search results).
+    
+    CloakBrowser patches 58 fingerprints at the C++ source level —
+    navigator.webdriver, plugins, chrome object, TLS fingerprint, etc.
+    """
+    browser = await launch_async(
+        headless=True,
+        locale="he-IL",
+        timezone="Asia/Jerusalem",
+        humanize=False,
+        stealth_args=True,
+    )
+    # Return the browser — caller uses browser.new_page() / browser.new_context()
+    return browser
+
+
 class GenericPlaywrightScraper:
     """Generic Playwright-based scraper for JS-heavy stores.
     
@@ -114,25 +144,32 @@ class GenericPlaywrightScraper:
     def __init__(self, store: Store, config: dict = None):
         self.store = store
         self.config = config or {}
-        self.timeout = self.config.get("timeout", 15000)
+        # CloakBrowser is slower to render — give more timeout
+        base_timeout = self.config.get("timeout", 15000)
+        if CLOAK_AVAILABLE:
+            base_timeout = max(base_timeout, 30000)
+        self.timeout = base_timeout
     
     async def search(self, query: str) -> List[ProductPrice]:
-        """Search using Playwright browser."""
+        """Search using CloakBrowser (preferred) or Playwright fallback."""
         search_patterns = self.config.get(
             "search_patterns",
             ["/Search/?q={query}", "/?s={query}&post_type=product", 
              "/search/result/?q={query}", "/catalogsearch/result/?q={query}"]
         )
         
-        browser = await PlaywrightEngine.get_browser()
-        # Use a persistent user data directory to save session state (cookies/local storage)
-        context = await browser.launch_persistent_context(
-            user_data_dir="./data/playwright_sessions",
-            user_agent=_get_ua(),
-            locale="he-IL",
-            timezone_id="Asia/Jerusalem",
-            viewport={"width": 1920, "height": 1080},
-        )
+        # Use CloakBrowser if available, otherwise fall back to Playwright
+        if CLOAK_AVAILABLE:
+            context = await _create_cloak_context(store_name=self.store.name)
+        else:
+            browser = await PlaywrightEngine.get_browser()
+            context = await browser.launch_persistent_context(
+                user_data_dir="./data/playwright_sessions",
+                user_agent=_get_ua(),
+                locale="he-IL",
+                timezone_id="Asia/Jerusalem",
+                viewport={"width": 1920, "height": 1080},
+            )
         
         products = []
         try:
@@ -143,48 +180,54 @@ class GenericPlaywrightScraper:
                 try:
                     await page.goto(search_url, wait_until="domcontentloaded", timeout=self.timeout)
                     await asyncio.sleep(2)
+                    logger.info("Scraping %s → %s", self.store.name, search_url)
                     
-                    # Handle age verification popup
-                    # Strategy: click age button via JS first (bypassing overlays),
-                    # then remove overlay divs, then wait for content to load
-                    try:
-                        # Step 1: Click age confirmation via JS (avoids overlay blocking)
-                        await page.evaluate("""() => {
-                            // Wine & More style: <a id="right_popup_click_*">אני מעל 18.</a>
-                            const ageLink = document.querySelector('a[id*="right_popup_click"], a[id*="age_confirm"]');
-                            if (ageLink) { ageLink.click(); return; }
-                            // Generic: any clickable element with age-related text
-                            const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
-                            for (const el of document.querySelectorAll('a, button, input[type="button"], input[type="submit"]')) {
-                                const t = el.textContent.trim();
-                                if (keywords.some(k => t.includes(k))) {
-                                    el.click();
-                                    return;
+                    # Handle age verification popup — but only for stores that need it
+                    # Paneco/Importer (Magento) don't need it and the click can redirect
+                    # to wrong pages. Only apply for non-Magento stores.
+                    skip_age_handling = "paneco" in self.store.url.lower() or "importer" in self.store.url.lower()
+                    if not skip_age_handling:
+                        try:
+                            # Step 1: Click age confirmation via JS (avoids overlay blocking)
+                            await page.evaluate("""() => {
+                                const ageLink = document.querySelector('a[id*="right_popup_click"], a[id*="age_confirm"]');
+                                if (ageLink) { ageLink.click(); return; }
+                                const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
+                                for (const el of document.querySelectorAll('a, button, input[type="button"], input[type="submit"]')) {
+                                    const t = el.textContent.trim();
+                                    if (keywords.some(k => t.includes(k))) {
+                                        el.click();
+                                        return;
+                                    }
                                 }
-                            }
-                        }""")
-                        await asyncio.sleep(1)
-                        
-                        # Step 2: Remove overlay divs that may still block the page
-                        await page.evaluate("""() => {
-                            const selectors = [
-                                '[id*="age_popup"]', '[id*="wrapper_age"]', '[id*="active_popup"]',
-                                '[class*="age-overlay"]', '[class*="age-overlay"]',
-                                '[id*="age-verification"]', '[class*="age-verification"]',
-                                '[class*="modal-overlay"]', '[class*="popup-overlay"]',
-                                '[class*="showPictures"]'
-                            ];
-                            selectors.forEach(sel => {
-                                document.querySelectorAll(sel).forEach(el => el.remove());
-                            });
-                        }""")
-                        await asyncio.sleep(1)
-                    except Exception as e:
-                        logger.warning("Age verification handling failed: %s", e)
+                            }""")
+                            await asyncio.sleep(1)
+                            
+                            # Step 2: Remove overlay divs
+                            await page.evaluate("""() => {
+                                const selectors = [
+                                    '[id*="age_popup"]', '[id*="wrapper_age"]', '[id*="active_popup"]',
+                                    '[class*="age-overlay"]', '[id*="age-verification"]',
+                                    '[class*="age-verification"]', '[class*="modal-overlay"]',
+                                    '[class*="popup-overlay"]', '[class*="showPictures"]'
+                                ];
+                                selectors.forEach(sel => {
+                                    document.querySelectorAll(sel).forEach(el => el.remove());
+                                });
+                            }""")
+                            await asyncio.sleep(1)
+                        except Exception as e:
+                            logger.warning("Age verification handling failed: %s", e)
                     
                     # Wait a bit more for lazy content
-                    await page.wait_for_load_state("networkidle", timeout=self.timeout)
-                    await asyncio.sleep(1)
+                    # Don't use networkidle — heavy sites (Magento) never reach it
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
+                    except Exception:
+                        pass
+                    # Magento sites (Paneco, Importer) load search results via AJAX
+                    # — they need more time to replace initial placeholder products
+                    await asyncio.sleep(6)
                     
                     html = await page.content()
                     products = self._extract_products(html, query)
@@ -490,6 +533,222 @@ class PwScraperFactory:
             return ManoVinoScraper(store)
         elif "Wine & More" in key or "wineandmore" in key.lower():
             return WineAndMoreScraper(store)
+        elif "פאנקו" in key or "paneco" in store.url.lower():
+            return PanecoScraper(store)
+        elif "היבואן" in key or "importer" in store.url.lower():
+            return ImporterScraper(store)
         else:
             # Generic fallback with store-specific config
             return GenericPlaywrightScraper(store)
+
+
+class PanecoScraper(GenericPlaywrightScraper):
+    """Scraper for פאנקו (paneco.co.il) — Magento-based.
+    
+    Magento search URL: /catalogsearch/result/?q={query}
+    Product containers: li.product.product-item
+    Name: .product-item-link
+    Price: .price-box .price (regular) / .special-price .price (register/sale)
+    Also: data-price-amount attribute on .price-box
+    
+    NOTE: Magento search with long Hebrew queries returns irrelevant results.
+    We shorten the query to the first 2 words to get better matches.
+    """
+    
+    def __init__(self, store: Store):
+        super().__init__(store, {
+            "timeout": 30000,
+            "search_patterns": [
+                "/catalogsearch/result/?q={query}",
+            ]
+        })
+    
+    async def search(self, query: str) -> List[ProductPrice]:
+        """Search with shortened query — Magento handles short queries better."""
+        # Take first 2 words for Magento search
+        words = query.split()
+        short_query = " ".join(words[:2]) if len(words) > 2 else query
+        return await super().search(short_query)
+    
+    def _extract_products(self, html: str, query: str) -> List[ProductPrice]:
+        """Extract products from Magento rendered HTML."""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "lxml")
+        products = []
+        
+        # Magento product containers: li.item.product.product-item
+        items = soup.select("li.product.product-item, li.item.product")
+        
+        for item in items:
+            # Product name: .product-item-link or .product-item-name
+            name_el = item.select_one(".product-item-link, .product-item-name")
+            if not name_el:
+                continue
+            name = name_el.get_text(strip=True)
+            if not name or len(name) < 3:
+                continue
+            
+            # Product URL
+            url = name_el.get("href", "")
+            if not url:
+                link = item.find("a", href=True)
+                url = link["href"] if link else ""
+            if url and url.startswith("/"):
+                url = self.store.url.rstrip("/") + url
+            
+            # Regular price: .price-box .price (JS-rendered text)
+            # NOTE: data-price-amount is often empty — .price text is the source of truth
+            regular_price = None
+            price_box = item.select_one(".price-box")
+            if price_box:
+                price_el = price_box.select_one(".price")
+                if price_el:
+                    price_text = price_el.get_text(strip=True)
+                    # Strip Hebrew currency symbols and extract number
+                    price_match = re.search(r'(\d+[,.]?\d*)', price_text.replace(",", ""))
+                    if price_match:
+                        try:
+                            regular_price = float(price_match.group(1))
+                        except ValueError:
+                            pass
+                # Fallback: data-price-amount attribute
+                if regular_price is None:
+                    data_price = price_box.get("data-price-amount", "")
+                    if data_price:
+                        try:
+                            regular_price = float(data_price)
+                        except ValueError:
+                            pass
+            
+            # Sale/register price: .special-price .price
+            sale_price = None
+            special_el = item.select_one(".special-price .price, .register-price .price")
+            if special_el:
+                sale_text = special_el.get_text(strip=True)
+                sale_match = re.search(r'(\d+[,.]?\d*)', sale_text.replace(",", ""))
+                if sale_match:
+                    try:
+                        sale_price = float(sale_match.group(1))
+                    except ValueError:
+                        pass
+            
+            if regular_price is None and sale_price is None:
+                continue
+            
+            # Filter out non-product noise (Product Qty, ratings, etc.)
+            if name in ("Product Qty", "Update Product Qty", "Minimize Qty Form"):
+                continue
+            if "מתוך" in name and "היו רוכשים" in name:
+                continue
+            if regular_price and regular_price < 10:
+                continue
+            
+            products.append(ProductPrice(
+                product_name=name[:100],
+                store_name=self.store.name,
+                store_url=self.store.url,
+                regular_price=regular_price,
+                sale_price=sale_price,
+                is_on_sale=sale_price is not None and sale_price < (regular_price or 999999),
+                product_url=url,
+            ))
+        
+        return products
+
+
+class ImporterScraper(GenericPlaywrightScraper):
+    """Scraper for היבואן (the-importer.co.il) — Magento-based.
+    
+    Same Magento structure as Paneco — shortens query for better results.
+    """
+    
+    def __init__(self, store: Store):
+        super().__init__(store, {
+            "timeout": 30000,
+            "search_patterns": [
+                "/catalogsearch/result/?q={query}",
+            ]
+        })
+    
+    async def search(self, query: str) -> List[ProductPrice]:
+        """Search with shortened query — Magento handles short queries better."""
+        words = query.split()
+        short_query = " ".join(words[:2]) if len(words) > 2 else query
+        return await super().search(short_query)
+    
+    def _extract_products(self, html: str, query: str) -> List[ProductPrice]:
+        """Extract products from Magento rendered HTML (same as Paneco)."""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "lxml")
+        products = []
+        
+        items = soup.select("li.product.product-item, li.item.product")
+        
+        for item in items:
+            name_el = item.select_one(".product-item-link, .product-item-name")
+            if not name_el:
+                continue
+            name = name_el.get_text(strip=True)
+            if not name or len(name) < 3:
+                continue
+            
+            url = name_el.get("href", "")
+            if not url:
+                link = item.find("a", href=True)
+                url = link["href"] if link else ""
+            if url and url.startswith("/"):
+                url = self.store.url.rstrip("/") + url
+            
+            # Price: .price text first (JS-rendered), data-price-amount fallback
+            regular_price = None
+            price_box = item.select_one(".price-box")
+            if price_box:
+                price_el = price_box.select_one(".price")
+                if price_el:
+                    price_text = price_el.get_text(strip=True)
+                    price_match = re.search(r'(\d+[,.]?\d*)', price_text.replace(",", ""))
+                    if price_match:
+                        try:
+                            regular_price = float(price_match.group(1))
+                        except ValueError:
+                            pass
+                if regular_price is None:
+                    data_price = price_box.get("data-price-amount", "")
+                    if data_price:
+                        try:
+                            regular_price = float(data_price)
+                        except ValueError:
+                            pass
+            
+            sale_price = None
+            special_el = item.select_one(".special-price .price, .register-price .price")
+            if special_el:
+                sale_text = special_el.get_text(strip=True)
+                sale_match = re.search(r'(\d+[,.]?\d*)', sale_text.replace(",", ""))
+                if sale_match:
+                    try:
+                        sale_price = float(sale_match.group(1))
+                    except ValueError:
+                        pass
+            
+            if regular_price is None and sale_price is None:
+                continue
+            
+            if name in ("Product Qty", "Update Product Qty", "Minimize Qty Form"):
+                continue
+            if "מתוך" in name and "היו רוכשים" in name:
+                continue
+            if regular_price and regular_price < 10:
+                continue
+            
+            products.append(ProductPrice(
+                product_name=name[:100],
+                store_name=self.store.name,
+                store_url=self.store.url,
+                regular_price=regular_price,
+                sale_price=sale_price,
+                is_on_sale=sale_price is not None and sale_price < (regular_price or 999999),
+                product_url=url,
+            ))
+        
+        return products

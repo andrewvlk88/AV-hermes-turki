@@ -265,7 +265,9 @@ class HTMLFallbackScraper:
         self.search_pattern = search_pattern
     
     async def search(self, query: str) -> List[ProductPrice]:
-        """Fetch search page via HTTP and parse HTML."""
+        """Fetch search page via CloakBrowser and parse HTML."""
+        from src.scrapers.html_scrapers import _fetch_html
+        
         patterns_to_try = [
             self.search_pattern,
             "/?s={query}&post_type=product",
@@ -273,26 +275,15 @@ class HTMLFallbackScraper:
             "/search/result/?q={query}",
         ]
         
-        headers = {
-            "User-Agent": _get_ua(),
-            "Accept": "text/html",
-            "Accept-Language": "he-IL,he;q=0.9",
-        }
-        
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False) as client:
-            for pattern in patterns_to_try:
-                if not pattern:
-                    continue
-                search_url = self.store.url.rstrip("/") + pattern.replace("{query}", quote(query))
-                try:
-                    resp = await client.get(search_url, headers=headers)
-                    if resp.status_code == 200 and len(resp.text) > 500:
-                        products = self._parse_html(resp.text, query)
-                        if products:
-                            return products
-                except Exception as e:
-                    logger.warning("HTML fallback request failed for %s: %s", search_url, e)
-                    continue
+        for pattern in patterns_to_try:
+            if not pattern:
+                continue
+            search_url = self.store.url.rstrip("/") + pattern.replace("{query}", quote(query))
+            html_src = await _fetch_html(search_url, store_name=self.store.name)
+            if html_src and len(html_src) > 500:
+                products = self._parse_html(html_src, query)
+                if products:
+                    return products
         
         return []
     
@@ -461,49 +452,60 @@ class UnifiedScraper:
             return HTMLFallbackScraper(store, search_pattern)
     
     @staticmethod
-    async def search_all(query: str, progress_callback=None) -> dict:
-        """Search ALL stores in parallel using sub-agents.
+    async def search_all(query: str, progress_callback=None, run_id: str = None) -> dict:
+        """Search ALL stores SEQUENTIALLY (not parallel).
         
-        Uses Semaphore(3) to limit concurrent requests and avoid
-        triggering WAF/DDoS protections on store servers.
+        CloakBrowser launches a full Chromium per store — running in parallel
+        causes resource exhaustion and session conflicts. Sequential mode
+        also lets us save each result to SQLite immediately, so partial
+        results survive even if later stores fail.
         """
-        all_prices = {}
-        tasks = []
-        semaphore = asyncio.Semaphore(3)
+        from src.storage.sqlite_store import (
+            save_store_result, mark_store_error, mark_store_running
+        )
         
-        async def search_with_limit(name, scraper, query):
-            async with semaphore:
-                return await scraper.search(query)
+        all_prices = {}
         
         for name, url, engine, pattern in UnifiedScraper.STORE_CONFIGS:
-            store = Store(name=name, url=url, search_path=pattern or "", type="static")
-            
             # Haturki excluded (already handled separately in run.py)
             if engine == "haturki_api":
                 continue
+            
+            store = Store(name=name, url=url, search_path=pattern or "", type="static")
+            
+            # Mark as running
+            if run_id:
+                mark_store_running(run_id, query, name)
+            
+            try:
+                scraper = UnifiedScraper.get_scraper(name, url)
+                result = await scraper.search(query)
                 
-            scraper = UnifiedScraper.get_scraper(name, url)
-            tasks.append((name, search_with_limit(name, scraper, query)))
-        
-        # Run all searches in parallel (limited to 3 concurrent)
-        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-        
-        for (name, _), result in zip(tasks, results):
-            if isinstance(result, Exception):
-                all_prices[name] = []
-                if progress_callback:
-                    progress_callback(name, 0, f"❌ {type(result).__name__}")
-            else:
-                # Apply product name cleaning to all results
+                # Apply product name cleaning
                 cleaned_results = []
                 for p in result:
                     p.product_name = clean_product_name(p.product_name)
-                    # Filter bogus prices
                     best_price = p.sale_price or p.regular_price
                     if best_price and not is_bogus_price(best_price, p.product_name):
                         cleaned_results.append(p)
+                
                 all_prices[name] = cleaned_results
+                
+                # Save to SQLite immediately
+                if run_id:
+                    saved = save_store_result(run_id, query, name, cleaned_results)
+                
                 if progress_callback:
                     progress_callback(name, len(cleaned_results), "✅")
                     
+            except Exception as e:
+                all_prices[name] = []
+                if run_id:
+                    mark_store_error(run_id, query, name, str(e))
+                if progress_callback:
+                    progress_callback(name, 0, f"❌ {type(e).__name__}")
+            
+            # Close CloakBrowser context between stores to free resources
+            # (each store creates its own persistent context)
+        
         return all_prices

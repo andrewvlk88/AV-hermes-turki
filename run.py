@@ -141,7 +141,12 @@ def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
 
 
 async def search_all(query: str) -> dict:
-    """Search ALL stores in parallel."""
+    """Search ALL stores — Haturki API first, then rest sequentially."""
+    from src.storage.sqlite_store import init_db, save_store_result, run_id_gen
+    
+    init_db()
+    run_id = run_id_gen()
+    
     # 1. Haturki API (fastest)
     print(f"\n🦃 הטורקי (API)...")
     haturki_store = Store(name="הטורקי", url="https://haturki.com", search_path="", type="static")
@@ -152,14 +157,16 @@ async def search_all(query: str) -> dict:
             price = p.sale_price or p.regular_price
             vol = f" ({p.volume_ml:.0f}ml)" if p.volume_ml else ""
             print(f"   ✅ {p.product_name}{vol}: {price:.0f}₪")
+        # Save Haturki results to SQLite too
+        save_store_result(run_id, query, "הטורקי", haturki_products)
     else:
         print(f"   ❌ לא נמצא")
     
     all_prices = {"הטורקי": haturki_products}
     
-    # 2. All other stores in parallel
-    print(f"\n🏪 שאר החנויות (ביחד במקביל)...")
-    other_prices = await UnifiedScraper.search_all(query, progress_callback)
+    # 2. All other stores SEQUENTIALLY (CloakBrowser needs full Chromium per store)
+    print(f"\n🏪 שאר החנויות (אחת אחרי שנייה)...")
+    other_prices = await UnifiedScraper.search_all(query, progress_callback, run_id=run_id)
     all_prices.update(other_prices)
     
     return all_prices

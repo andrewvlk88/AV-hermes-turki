@@ -24,50 +24,59 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-async def _fetch_html(url: str) -> Optional[str]:
-    """Fetch HTML using Playwright if available to bypass Cloudflare/Age popups."""
+async def _fetch_html(url: str, store_name: str = None) -> Optional[str]:
+    """Fetch HTML using CloakBrowser (stealth Chromium) to bypass Cloudflare/Age popups.
+    
+    Falls back to httpx if CloakBrowser is unavailable.
+    """
+    # Try CloakBrowser first
     try:
-        from src.scrapers.playwright_scrapers import PlaywrightEngine, _create_context
-        browser = await PlaywrightEngine.get_browser()
-        context = await _create_context(browser)
-        page = await context.new_page()
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            # Bypass age popup via JS click
+        from src.scrapers.playwright_scrapers import CLOAK_AVAILABLE, _create_cloak_context
+        if CLOAK_AVAILABLE:
+            browser = await _create_cloak_context(store_name=store_name)
+            page = await browser.new_page()
             try:
-                await page.evaluate('''() => {
-                    // Click
-                    const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
-                    for (const el of document.querySelectorAll('a, button, input')) {
-                        const t = el.textContent.trim();
-                        if (keywords.some(k => t.includes(k))) { el.click(); break; }
-                    }
-                    // Remove
-                    const selectors = [
-                        '[id*="age_popup"]', '[id*="popup18plus"]', '[id*="wrapper_age"]', '[id*="active_popup"]',
-                        '.age-overlay', '.modal-backdrop', '.modal-overlay', '.popup-overlay'
-                    ];
-                    selectors.forEach(sel => {
-                        document.querySelectorAll(sel).forEach(el => el.remove());
-                    });
-                    document.body.classList.remove('modal-open');
-                    document.body.style.overflow = 'auto';
-                }''')
-                await asyncio.sleep(1)
-            except: pass
-            await asyncio.sleep(2)
-            return await page.content()
-        except Exception as e:
-            logger.warning(f"Playwright fetch failed for {url}: {e}")
-            return None
-        finally:
-            await page.close()
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                # Bypass age popup via JS click
+                try:
+                    await page.evaluate('''() => {
+                        const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
+                        for (const el of document.querySelectorAll('a, button, input')) {
+                            const t = el.textContent.trim();
+                            if (keywords.some(k => t.includes(k))) { el.click(); break; }
+                        }
+                        const selectors = [
+                            '[id*="age_popup"]', '[id*="popup18plus"]', '[id*="wrapper_age"]',
+                            '[id*="active_popup"]', '.age-overlay', '.modal-backdrop',
+                            '.modal-overlay', '.popup-overlay'
+                        ];
+                        selectors.forEach(sel => {
+                            document.querySelectorAll(sel).forEach(el => el.remove());
+                        });
+                        document.body.classList.remove('modal-open');
+                        document.body.style.overflow = 'auto';
+                    }''')
+                    await asyncio.sleep(1)
+                except:
+                    pass
+                await asyncio.sleep(3)
+                return await page.content()
+            except Exception as e:
+                logger.warning(f"CloakBrowser fetch failed for {url}: {e}")
+                return None
+            finally:
+                await page.close()
+                await browser.close()
     except ImportError:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False) as client:
-            try:
-                resp = await client.get(url, headers={"User-Agent": _get_ua()})
-                return resp.text if resp.status_code == 200 else None
-            except: return None
+        pass
+    
+    # Fallback: httpx
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, verify=False) as client:
+        try:
+            resp = await client.get(url, headers={"User-Agent": _get_ua()})
+            return resp.text if resp.status_code == 200 else None
+        except:
+            return None
 
 
 class MagentoHTMLScraper:
@@ -89,7 +98,7 @@ class MagentoHTMLScraper:
             "Accept-Language": "he-IL,he;q=0.9",
         }
         
-        html_text = await _fetch_html(search_url)
+        html_text = await _fetch_html(search_url, store_name=self.store.name)
         if not html_text: return []
         soup = BeautifulSoup(html.unescape(html_text), "lxml")
         products = []
@@ -179,7 +188,7 @@ class SarHascraper:
             "Accept": "text/html",
         }
         
-        html_text = await _fetch_html(search_url)
+        html_text = await _fetch_html(search_url, store_name=self.store.name)
         if not html_text: return []
         soup = BeautifulSoup(html.unescape(html_text), "lxml")
         products = []
@@ -266,7 +275,7 @@ class ProdBoxScraper:
             "Accept": "text/html",
         }
         
-        html_text = await _fetch_html(search_url)
+        html_text = await _fetch_html(search_url, store_name=self.store.name)
         if not html_text: return []
         soup = BeautifulSoup(html.unescape(html_text), "lxml")
         products = []
