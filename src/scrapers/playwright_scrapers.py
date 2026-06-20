@@ -577,7 +577,7 @@ class PanecoScraper(GenericPlaywrightScraper):
         products = []
         
         # Magento product containers: li.item.product.product-item
-        items = soup.select("li.product.product-item, li.item.product")
+        items = soup.select("li.product.product-item, li.item.product, div.product-item, div.product")
         
         for item in items:
             # Product name: .product-item-link or .product-item-name
@@ -682,7 +682,7 @@ class ImporterScraper(GenericPlaywrightScraper):
         soup = BeautifulSoup(html, "lxml")
         products = []
         
-        items = soup.select("li.product.product-item, li.item.product")
+        items = soup.select("li.product.product-item, li.item.product, div.product-item, div.product")
         
         for item in items:
             name_el = item.select_one(".product-item-link, .product-item-name")

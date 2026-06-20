@@ -26,7 +26,7 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 from src.models import ProductPrice, Store
-from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product
+from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, STOP_WORDS
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -50,31 +50,60 @@ class WooCommerceAPIScraper:
         self.store = store
     
     async def search(self, query: str) -> List[ProductPrice]:
-        """Search products via WooCommerce Store API."""
-        query_encoded = quote(query)
-        search_url = f"{self.store.url}/?rest_route=/wc/store/products&search={query_encoded}&per_page=10"
-        api_url = f"{self.store.url}/wp-json/wc/store/products?search={query_encoded}&per_page=10"
+        """Search products via WooCommerce Store API.
+        
+        Uses progressive querying (first 2 words, then first 1 word as fallback)
+        to bypass strict WooCommerce matching which returns 0 results for long Hebrew queries,
+        especially when brands are abbreviated (e.g., ק.ס instead of קברנה סוביניון).
+        """
+        words = [w for w in query.split() if w not in STOP_WORDS]
+        if not words:
+            return []
+            
+        # Progressive search terms:
+        # Term 1: First 2 words of the query (specific search)
+        # Term 2: First word of the query (broad search to find products with abbreviations)
+        search_terms = []
+        if len(words) >= 2:
+            search_terms.append(" ".join(words[:2]))
+        search_terms.append(words[0])
+        
+        # Deduplicate search terms
+        seen_terms = set()
+        search_terms = [x for x in search_terms if not (x in seen_terms or seen_terms.add(x))]
+        
+        all_products = []
+        seen_urls = set()
         
         async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False) as client:
-            for url in [search_url, api_url]:
-                try:
-                    resp = await client.get(url, headers=BASE_HEADERS)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if isinstance(data, list) and len(data) > 0:
-                            return self._parse_products(data, query)
-                except Exception as e:
-                    logger.warning("WooCommerce API request failed for %s: %s", url, e)
-                    continue
-        
-        return []
+            for term in search_terms:
+                query_encoded = quote(term)
+                search_url = f"{self.store.url}/?rest_route=/wc/store/products&search={query_encoded}&per_page=100"
+                api_url = f"{self.store.url}/wp-json/wc/store/products?search={query_encoded}&per_page=100"
+                
+                for url in [search_url, api_url]:
+                    try:
+                        resp = await client.get(url, headers=BASE_HEADERS)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if isinstance(data, list) and len(data) > 0:
+                                parsed = self._parse_products(data, query)
+                                for p in parsed:
+                                    if p.product_url not in seen_urls:
+                                        seen_urls.add(p.product_url)
+                                        all_products.append(p)
+                    except Exception as e:
+                        logger.warning("WooCommerce API request failed for %s: %s", url, e)
+                        continue
+                        
+        return all_products
     
     def _parse_products(self, data: list, query: str) -> List[ProductPrice]:
         """Parse WooCommerce Store API response using currency_minor_unit."""
         NOISE_WORDS = ["משלוח", "לתקנון", "מבצע", "חינם", "קופון", "שובר"]
         products = []
         
-        for item in data[:10]:
+        for item in data[:100]:
             name = clean_product_name(item.get("name", ""))
             
             # Skip noise items
@@ -176,31 +205,61 @@ class MagentoAPIScraper:
         self.store = store
     
     async def search(self, query: str) -> List[ProductPrice]:
-        """Search via Magento REST API."""
-        query_encoded = quote(query)
-        search_url = (
-            f"{self.store.url}/rest/default/V1/products"
-            f"?searchCriteria[filterGroups][0][filters][0][field]=name"
-            f"&searchCriteria[filterGroups][0][filters][0][value]=%25{query_encoded}%25"
-            f"&searchCriteria[pageSize]=10"
-        )
+        """Search via Magento REST API.
+        
+        Uses progressive querying (first 2 words, then first 1 word as fallback)
+        to bypass strict substring matching which fails for long Hebrew queries,
+        especially when brands or volumes differ.
+        """
+        words = [w for w in query.split() if w not in STOP_WORDS]
+        if not words:
+            return []
+            
+        # Progressive search terms:
+        # Term 1: First 2 words of the query (specific search)
+        # Term 2: First word of the query (broad search to find products with abbreviations)
+        search_terms = []
+        if len(words) >= 2:
+            search_terms.append(" ".join(words[:2]))
+        search_terms.append(words[0])
+        
+        # Deduplicate search terms
+        seen_terms = set()
+        search_terms = [x for x in search_terms if not (x in seen_terms or seen_terms.add(x))]
+        
+        all_products = []
+        seen_skus = set()
         
         async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False) as client:
-            try:
-                resp = await client.get(search_url, headers=BASE_HEADERS)
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
-            except Exception as e:
-                logger.warning("Magento API request failed for %s: %s", self.store.url, e)
-                return []
+            for term in search_terms:
+                query_encoded = quote(term)
+                search_url = (
+                    f"{self.store.url}/rest/default/V1/products"
+                    f"?searchCriteria[filterGroups][0][filters][0][field]=name"
+                    f"&searchCriteria[filterGroups][0][filters][0][value]=%25{query_encoded}%25"
+                    f"&searchCriteria[pageSize]=100"
+                )
+                try:
+                    resp = await client.get(search_url, headers=BASE_HEADERS)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        items = data.get("items", [])
+                        if items:
+                            parsed = self._parse_items(items, query)
+                            for p in parsed:
+                                if p.sku not in seen_skus:
+                                    seen_skus.add(p.sku)
+                                    all_products.append(p)
+                except Exception as e:
+                    logger.warning("Magento API request failed for %s: %s", self.store.url, e)
+                    continue
+                    
+        return all_products
         
-        items = data.get("items", [])
-        if not items:
-            return []
-        
+    def _parse_items(self, items: list, query: str) -> List[ProductPrice]:
+        """Parse Magento API products."""
         products = []
-        for item in items[:10]:
+        for item in items[:100]:
             name = clean_product_name(item.get("name", ""))
             
             # Filter irrelevant products
@@ -386,7 +445,7 @@ class UnifiedScraper:
         ("דרך היין", "https://www.wineroute.co.il", "woocommerce", "/?s={query}"),
         ("שר המשקאות", "https://www.mashkaot.co.il", "sar", "/?s={query}&post_type=product"),
         ("אליאסי משקאות", "https://www.eliasi.co.il", "prodbox_eliasi", "/?s={query}&post_type=product"),
-        ("ארי משקאות", "https://www.ari-g.co.il", "woocommerce", "/search/result/?q={query}"),
+        ("ארי משקאות", "https://ari-g.co.il", "woocommerce", "/search/result/?q={query}"),
         ("Liquor Store", "https://www.liquor-store.co.il", "woocommerce", "/?s={query}&post_type=product"),
         ("אלכוהום", "https://www.alcohome.co.il", "woocommerce", "/?s={query}&post_type=product"),
         ("משקאות המשמח", "https://www.hamesameach.co.il", "woocommerce", "/search/result/?q={query}"),

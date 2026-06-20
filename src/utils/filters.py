@@ -103,7 +103,7 @@ def is_bogus_price(price: float, product_name: str) -> bool:
 def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bool:
     """Check if a product is relevant to the search query.
     
-    Requires at least `min_words` significant (non-stop-word) words from the query
+    Requires at least a dynamic number of significant (non-stop-word) words from the query
     to appear in the product name. For Hebrew queries with geresh (׳) or quotes,
     we normalize both the query and product name.
     
@@ -117,14 +117,45 @@ def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bo
     if is_accessory(product_name):
         return False
     
-    # Normalize both strings: remove Hebrew diacritics, normalize quotes
+    # Normalize both strings: remove Hebrew diacritics, normalize quotes, and handle spelling/abbreviations
     def normalize(s: str) -> str:
         s = s.lower()
+        # Decode HTML entities if any slipped through
+        import html
+        s = html.unescape(s)
         # Normalize Hebrew quotes/geresh variants
         s = s.replace("'", "")     # Remove apostrophes
         s = s.replace('"', '')
         s = s.replace('׳', '')     # Hebrew geresh
         s = s.replace('״', '')     # Hebrew gershayim
+        s = s.replace('-', ' ')    # Replace hyphens with space
+        s = s.replace('.', ' ')    # Replace periods with space for acronyms like ק.ס -> ק ס
+        
+        # Standardize common variations/typos/abbreviations in Israeli alcohol names
+        s = s.replace('סובניון', 'סוביניון')
+        s = s.replace('סביניון', 'סוביניון')
+        
+        # Red Wine variations: Cabernet Sauvignon (ק.ס / ק"ס / קס -> קברנה סוביניון)
+        s = re.sub(r'\bק\s*ס\b|\bקס\b|\bקברנה\s+סוביניון\b', ' קברנה סוביניון ', s)
+        # Cabernet Franc (ק.פ / ק"פ / קפ -> קברנה פרנק)
+        s = re.sub(r'\bק\s*פ\b|\bקפ\b|\bקברנה\s+פרנק\b', ' קברנה פרנק ', s)
+        # Sauvignon Blanc (ס.ב / ס"ב / סב -> סוביניון בלאן)
+        s = re.sub(r'\bס\s*ב\b|\bסב\b|\bסוביניון\s+בלאן\b', ' סוביניון בלאן ', s)
+        # Gewurztraminer (גוורץ / גווירץ / גוורצטרמינר -> גוורצטרמינר)
+        s = re.sub(r'\bגוו?ירצ?טרמינר\b|\bגוו?ירץ\b', ' גוורצטרמינר ', s)
+        
+        # Prefixes to strip (common descriptors that cause false negatives)
+        prefixes_to_strip = [
+            r'^יין\s+', r'^בקבוק\s+של\s+', r'^בקבוק\s+', r'^מארז\s+', 
+            r'^ויסקי\s+', r'^וויסקי\s+', r'^וודקה\s+', r'^בירה\s+'
+        ]
+        for pref in prefixes_to_strip:
+            s = re.sub(pref, '', s)
+            
+        # Volume abbreviations
+        s = s.replace('ליטר', 'ל')
+        s = re.sub(r'\bml\b|\bמ"?ל\b', ' מל ', s)
+        
         # Normalize whitespace
         s = re.sub(r'\s+', ' ', s).strip()
         return s
@@ -133,7 +164,7 @@ def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bo
     norm_query = normalize(query)
     
     # Direct substring match always passes
-    if norm_query in norm_name:
+    if norm_query in norm_name or norm_name in norm_query:
         return True
     
     # Extract significant words from query (excluding stop words and very short words)
@@ -143,10 +174,19 @@ def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bo
         # If query has no significant words, fall back to any match
         return True
     
+    # Calculate a dynamic min_words threshold to prevent false positives for long queries
+    # For example, searching "ירדן קברנה סוביניון 2022" should require at least 3 match words,
+    # so "ירדן קברנה פרנק 2022" (2 matches) is filtered out.
+    calc_min = min_words
+    if len(query_words) >= 4:
+        calc_min = max(min_words, 3)
+    elif len(query_words) == 3:
+        calc_min = max(min_words, 2)
+        
     # Check how many query words appear in the product name
     matches = sum(1 for w in query_words if w in norm_name)
     
-    return matches >= min(min_words, len(query_words))
+    return matches >= min(calc_min, len(query_words))
 
 
 def extract_volume_ml(name: str) -> Optional[float]:

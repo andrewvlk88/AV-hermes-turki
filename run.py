@@ -34,15 +34,36 @@ def normalize_for_matching(name: str) -> str:
     import re
     # Decode any remaining HTML entities
     name = clean_product_name(name)
+    
+    # Standardize common variations/typos/abbreviations in Israeli alcohol names
+    name = name.lower()
+    name = name.replace('סובניון', 'סוביניון')
+    name = name.replace('סביניון', 'סוביניון')
+    
+    # Red Wine variations: Cabernet Sauvignon (ק.ס / ק"ס / קס -> קברנה סוביניון)
+    name = re.sub(r'\bק\s*ס\b|\bקס\b|\bקברנה\s+סוביניון\b', ' קברנה סוביניון ', name)
+    # Cabernet Franc (ק.פ / ק"פ / קפ -> קברנה פרנק)
+    name = re.sub(r'\bק\s*פ\b|\bקפ\b|\bקברנה\s+פרנק\b', ' קברנה פרנק ', name)
+    # Sauvignon Blanc (ס.ב / ס"ב / סב -> סוביניון בלאן)
+    name = re.sub(r'\bס\s*ב\b|\bסב\b|\bסוביניון\s+בלאן\b', ' סוביניון בלאן ', name)
+    # Gewurztraminer (גוורץ / גווירץ / גוורצטרמינר -> גוורצטרמינר)
+    name = re.sub(r'\bגוו?ירצ?טרמינר\b|\bגוו?ירץ\b', ' גוורצטרמינר ', name)
+    
+    # Strip common prefixes
+    prefixes_to_strip = [
+        r'^יין\s+', r'^בקבוק\s+של\s+', r'^בקבוק\s+', r'^מארז\s+', 
+        r'^ויסקי\s+', r'^וויסקי\s+', r'^וודקה\s+', r'^בירה\s+'
+    ]
+    for pref in prefixes_to_strip:
+        name = re.sub(pref, '', name)
+        
     # Remove volume suffixes like "700 מ"ל", "1 ליטר", "1.75 ליטר", "(700ml)" 
-    name = re.sub(r'\s*\(?\d+[\.\d]*\s*(?:מ["\']ל|ml|ליטר|L)\)?', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s*\(?\d+[\.\d]*\s*(?:מ["\']ל|ml|ליטר|ל|L)\)?', '', name, flags=re.IGNORECASE)
     # Remove parenthetical notes (e.g., "(Jack Daniels Honey)")
     name = re.sub(r'\([^)]*\)', '', name)
     # Normalize Hebrew quotes and geresh
-    name = name.replace("'", "").replace('"', '').replace('׳', '').replace('״', '')
-    # Remove "וויסקי" prefix (too generic, causes false matches)
-    name = re.sub(r'^וויסקי\s+', '', name)
-    name = re.sub(r'^ויסקי\s+', '', name)
+    name = name.replace("'", "").replace('"', '').replace('׳', '').replace('״', '').replace('.', ' ')
+    
     # Remove "טנסי" anywhere (just adds noise to matching, all JD is Tennessee)
     name = name.replace('טנסי', '')
     # Normalize whitespace

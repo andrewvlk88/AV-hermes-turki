@@ -69,7 +69,7 @@ stores:
 
   - id: 9
     name: "ארי משקאות"
-    url: "https://www.ari-g.co.il"
+    url: "https://ari-g.co.il"
     search_path: "/search/result/?q={query}"
     type: "dynamic"
     platform: "WooCommerce"
