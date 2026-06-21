@@ -97,13 +97,13 @@ async def main():
                 seen.add(d)
                 unique_deals.append(d)
 
-        # Print raw deals for the agent to summarize
-        print("💜 טורקי פרייס אינטליג׳נס — מצאתי דילים חמים!")
-        print("=" * 55)
+        # Print deals in clean, simple format
+        print("🦃 טורקי פרייס ווטשדוג — נמצאו דילים!")
+        print()
         for deal in unique_deals[:20]:
             print(f"  {deal}")
-        print("=" * 55)
-        print("🪽 Hermes Price Watchdog")
+        print()
+        print(f"סה״כ {len(unique_deals)} דילים · {len(queries)} מוצרים נסרקו")
 
     logger.info("=== Watchdog run finished | %d unique deals ===", len(unique_deals))
 

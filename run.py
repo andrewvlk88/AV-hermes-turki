@@ -21,7 +21,7 @@ from src.models import Store
 
 def progress_callback(name, count, msg):
     """Print a progress line for each store."""
-    print(f"   {name}: {msg}")
+    _print(f"   {name}: {msg}")
 
 
 def normalize_for_matching(name: str) -> str:
@@ -169,7 +169,7 @@ async def search_all(query: str) -> dict:
     run_id = run_id_gen()
     
     # 1. Haturki API (fastest)
-    print(f"\n🦃 הטורקי (API)...")
+    _print(f"\n🦃 הטורקי (API)...")
     haturki_store = Store(name="הטורקי", url="https://haturki.com", search_path="", type="static")
     haturki = HaturkiAPIScraper(haturki_store)
     haturki_products = await haturki.search(query)
@@ -177,16 +177,16 @@ async def search_all(query: str) -> dict:
         for p in haturki_products[:5]:
             price = p.sale_price or p.regular_price
             vol = f" ({p.volume_ml:.0f}ml)" if p.volume_ml else ""
-            print(f"   ✅ {p.product_name}{vol}: {price:.0f}₪")
+            _print(f"   ✅ {p.product_name}{vol}: {price:.0f}₪")
         # Save Haturki results to SQLite too
         save_store_result(run_id, query, "הטורקי", haturki_products)
     else:
-        print(f"   ❌ לא נמצא")
+        _print(f"   ❌ לא נמצא")
     
     all_prices = {"הטורקי": haturki_products}
     
     # 2. All other stores SEQUENTIALLY (CloakBrowser needs full Chromium per store)
-    print(f"\n🏪 שאר החנויות (אחת אחרי שנייה)...")
+    _print(f"\n🏪 שאר החנויות (אחת אחרי שנייה)...")
     other_prices = await UnifiedScraper.search_all(query, progress_callback, run_id=run_id)
     all_prices.update(other_prices)
     
