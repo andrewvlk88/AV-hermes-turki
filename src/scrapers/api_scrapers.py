@@ -66,18 +66,14 @@ class HaturkiAPIScraper:
             name = clean_product_name(item.get("name", ""))
             
             # Fix 4: Filter irrelevant products - require relevance to query
-            if not is_relevant_product(name, query, min_words=1):
+            # CRITICAL: The Turki API returns ALL products, not just search matches.
+            # We must filter strictly to avoid comparing unrelated products.
+            if not is_relevant_product(name, query, min_words=2):
                 continue
             
             name_lower = name.lower().replace("'", "").replace('"', '')
             
-            # Fix 3: Improved matching that considers volume
-            # When the query matches a broad brand (e.g. "ג'ק דניאלס"),
-            # we keep products with different volumes but label them separately.
-            # This prevents mini bottles from being grouped with full-size bottles.
-            
-            # Match: all query words should appear in product name
-            # (at least 2 words match, or the full query is a substring)
+            # Match: require at least 2 significant words to match, OR full query substring
             if query_lower in name_lower:
                 pass  # Direct substring match
             else:

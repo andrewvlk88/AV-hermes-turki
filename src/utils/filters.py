@@ -9,6 +9,13 @@ STOP_WORDS = {
     "של", "עם", "בלי", "לא", "גם", "או", "על", "אל", "מה", "זה", "הוא", "היא",
     "את", "שלא", "רק", "עוד", "כל", "מיני", "ו", "ה", "ב", "ל", "מ", "כ",
     "the", "and", "or", "with", "for", "in", "on", "at", "a", "an",
+    # Generic descriptors that appear across many products — must NOT count as brand matches
+    "אורגינל", "original", "שנים", "שנה", "years", "ישראל", "israel", "כשר", "kosher",
+    "טנסי", "tennessee", "קלאסי", "classic", "פרימיום", "premium",
+    "בקבוק", "bottle", "ליטר", "liter", "מל", "ml", "ל", "בלנדד", "blended",
+    # Numbers and volume units — these appear everywhere and must NOT count as brand matches
+    "12", "15", "18", "10", "7", "8", "700", "750", "500", "1", "2", "3",
+    "1l", "1l", "70", "50", "100", "200", "175", "350",
 }
 
 # Keywords indicating mini/small bottles that can legitimately be cheap
@@ -20,11 +27,14 @@ MINI_KEYWORDS = {
     "50 מ\"ל", "מיני", "mini", "miniature", "sample",
 }
 
-# Keywords indicating non-alcohol accessories that should be filtered out
+# Keywords indicating non-alcohol accessories / irrelevant items that should be filtered out
 ACCESORY_KEYWORDS = {
     "כוסות", "כוס", "שוט", "סט ", "מארז כוס", "בקבוקון", "מדיח",
     "כוסית", "מתנה", "מזיגה", "פקק", "מפתח", "מגן", "אחסון", "קופסא", "מארז",
     "glasses", "glass", "shot", "set ", "opener", "gift",
+    # Non-alcohol items that pollute search results
+    "מארז מתנה", "קרטון", "מהודר", "סירופ", "סאקה", "מיקס", "מונין",
+    "סאוור", "ביטר", "מסחרר", "תחליף", "נטול", "אלכוהול",
 }
 
 # Minimum price threshold for full-size alcohol bottles
@@ -109,6 +119,10 @@ def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bo
     
     Also filters out accessories (glasses, sets, openers) when the query
     is clearly about alcohol.
+    
+    CRITICAL: At least one BRAND word (non-generic, non-descriptor) must match.
+    Products like "וודקה נמירוף אורגינל" must NOT match query "גלנמורנג'י 12 אורגינל"
+    just because "אורגינל" appears in both.
     """
     if not product_name or not query:
         return False
@@ -182,9 +196,19 @@ def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bo
         calc_min = max(min_words, 3)
     elif len(query_words) == 3:
         calc_min = max(min_words, 2)
-        
+    
     # Check how many query words appear in the product name
     matches = sum(1 for w in query_words if w in norm_name)
+    
+    # CRITICAL: At least one match must be a BRAND word, not a generic descriptor.
+    # Brand words = query words that are NOT in STOP_WORDS and have len > 2.
+    # This prevents "וודקה נמירוף אורגינל" from matching "גלנמורנג'י 12 אורגינל"
+    # just because "אורגינל" (now a stop word) appears in both.
+    brand_words = [w for w in query_words if len(w) > 2 and w not in STOP_WORDS]
+    brand_matches = sum(1 for w in brand_words if w in norm_name)
+    
+    if brand_matches == 0 and len(brand_words) > 0:
+        return False
     
     return matches >= min(calc_min, len(query_words))
 
