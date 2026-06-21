@@ -6,6 +6,7 @@ compared to Haturki's reference prices, it prints them in a beautiful cyberpunk 
 If no deals are found, it remains completely silent (watchdog pattern).
 """
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -16,52 +17,95 @@ import run
 from run import search_all, build_report, PlaywrightEngine
 from src.storage.sqlite_store import get_db, init_db
 
+# Configure logging to file for enterprise observability
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_DIR / "cron_tracker.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
+logger = logging.getLogger("turk_pi.cron_tracker")
+
+# Overall run timeout: 30 minutes is plenty for 18 stores x a few queries.
+RUN_TIMEOUT_SECONDS = 30 * 60
+
+
+async def run_single_query(query: str):
+    """Run a single tracked query and return deals found."""
+    run.SILENT = True
+    init_db()
+
+    logger.info("Starting query: %r", query)
+    try:
+        all_prices = await asyncio.wait_for(search_all(query), timeout=RUN_TIMEOUT_SECONDS)
+        report = build_report(all_prices, query)
+        if report.deals_found:
+            logger.info("Query %r: %d deals found", query, len(report.deals_found))
+        else:
+            logger.info("Query %r: no deals", query)
+        return report.deals_found or []
+    except asyncio.TimeoutError:
+        logger.error("Query %r timed out after %ds", query, RUN_TIMEOUT_SECONDS)
+        return []
+    except Exception:
+        logger.exception("Query %r failed", query)
+        return []
+
 
 async def main():
     # Force run.py to run in silent mode
     run.SILENT = True
-    
+
     init_db()
-    
+
     conn = get_db()
     try:
         rows = conn.execute("SELECT query FROM tracked_queries ORDER BY id").fetchall()
         queries = [row['query'] for row in rows]
     finally:
         conn.close()
-        
+
     if not queries:
+        logger.info("No tracked queries found; exiting.")
         return
-        
+
+    logger.info("=== Turkí Price Watchdog run started | %d queries ===", len(queries))
+
     all_deals = []
-    
     try:
         for query in queries:
-            try:
-                # Search all stores sequentially
-                all_prices = await search_all(query)
-                
-                # Build the comparison report
-                report = build_report(all_prices, query)
-                
-                # Collect special deals / savings
-                if report.deals_found:
-                    all_deals.extend(report.deals_found)
-            except Exception:
-                # Silently ignore errors during cron so it doesn't spam alerts unless necessary
-                continue
+            deals = await run_single_query(query)
+            if deals:
+                all_deals.extend(deals)
     finally:
-        # Ensure Playwright browser is closed
-        await PlaywrightEngine.close()
-        
+        try:
+            await asyncio.wait_for(PlaywrightEngine.close(), timeout=30)
+        except Exception:
+            logger.exception("Failed to close PlaywrightEngine cleanly")
+
+    unique_deals = []
     # Delivery: Watchdog Pattern (Silent if no deals found)
     if all_deals:
-        print("💜 *טורקי פרייס אינטליג׳נס — מצאתי דילים חמים!* 🦃")
+        # Deduplicate deals
+        seen = set()
+        for d in all_deals:
+            if d not in seen:
+                seen.add(d)
+                unique_deals.append(d)
+
+        # Print raw deals for the agent to summarize
+        print("💜 טורקי פרייס אינטליג׳נס — מצאתי דילים חמים!")
         print("=" * 55)
-        for deal in all_deals[:15]:  # Cap to top 15 deals to prevent Telegram length limit
+        for deal in unique_deals[:20]:
             print(f"  {deal}")
         print("=" * 55)
-        print("🪽 *Hermes Price Watchdog*")
+        print("🪽 Hermes Price Watchdog")
+
+    logger.info("=== Watchdog run finished | %d unique deals ===", len(unique_deals))
 
 
 if __name__ == "__main__":

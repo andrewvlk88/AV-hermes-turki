@@ -435,6 +435,17 @@ class HTMLFallbackScraper:
 class UnifiedScraper:
     """Master scraper - picks the right method per store."""
     
+    # Per-store hard timeout (seconds). If a store takes longer, it is killed
+    # and logged so one bad store cannot stall the entire watchdog run.
+    DEFAULT_STORE_TIMEOUT = 90
+    STORE_TIMEOUTS = {
+        "פאנקו": 120,
+        "היבואן": 120,
+        "מנו וינו": 120,
+        "בית המשקאות של אביב": 120,
+        "Wine & More": 120,
+    }
+    
     # Store configurations
     # Auto-generated from config.yaml — single source of truth
     STORE_CONFIGS = [
@@ -512,59 +523,70 @@ class UnifiedScraper:
     
     @staticmethod
     async def search_all(query: str, progress_callback=None, run_id: str = None) -> dict:
-        """Search ALL stores SEQUENTIALLY (not parallel).
-        
-        CloakBrowser launches a full Chromium per store — running in parallel
-        causes resource exhaustion and session conflicts. Sequential mode
-        also lets us save each result to SQLite immediately, so partial
-        results survive even if later stores fail.
+        """Search ALL stores SEQUENTIALLY with per-store hard timeout.
+
+        Each store is wrapped in asyncio.wait_for() so a single hanging site
+        cannot stall the whole watchdog run. Results are saved to SQLite
+        immediately, so partial progress survives failures.
         """
         from src.storage.sqlite_store import (
             save_store_result, mark_store_error, mark_store_running
         )
-        
+
         all_prices = {}
-        
+        total_stores = len([c for c in UnifiedScraper.STORE_CONFIGS if c[2] != "haturki_api"])
+        completed = 0
+
         for name, url, engine, pattern in UnifiedScraper.STORE_CONFIGS:
             # Haturki excluded (already handled separately in run.py)
             if engine == "haturki_api":
                 continue
-            
+
             store = Store(name=name, url=url, search_path=pattern or "", type="static")
-            
-            # Mark as running
+            store_timeout = UnifiedScraper.STORE_TIMEOUTS.get(name, UnifiedScraper.DEFAULT_STORE_TIMEOUT)
+
             if run_id:
                 mark_store_running(run_id, query, name)
-            
+
+            start_ts = asyncio.get_event_loop().time()
+            products = []
+            error_msg = None
             try:
                 scraper = UnifiedScraper.get_scraper(name, url)
-                result = await scraper.search(query)
-                
+                products = await asyncio.wait_for(scraper.search(query), timeout=store_timeout)
+
                 # Apply product name cleaning
                 cleaned_results = []
-                for p in result:
+                for p in products:
                     p.product_name = clean_product_name(p.product_name)
                     best_price = p.sale_price or p.regular_price
                     if best_price and not is_bogus_price(best_price, p.product_name):
                         cleaned_results.append(p)
-                
-                all_prices[name] = cleaned_results
-                
-                # Save to SQLite immediately
+                products = cleaned_results
+
                 if run_id:
-                    saved = save_store_result(run_id, query, name, cleaned_results)
-                
+                    save_store_result(run_id, query, name, products)
+
                 if progress_callback:
-                    progress_callback(name, len(cleaned_results), "✅")
-                    
+                    progress_callback(name, len(products), "✅")
+
+            except asyncio.TimeoutError:
+                error_msg = f"timeout after {store_timeout}s"
+                logger.error("Store %s timed out after %ds for query %r", name, store_timeout, query)
+                if progress_callback:
+                    progress_callback(name, 0, f"⏱️ timeout {store_timeout}s")
             except Exception as e:
-                all_prices[name] = []
-                if run_id:
-                    mark_store_error(run_id, query, name, str(e))
+                error_msg = f"{type(e).__name__}: {e}"
+                logger.exception("Store %s failed for query %r", name, query)
                 if progress_callback:
                     progress_callback(name, 0, f"❌ {type(e).__name__}")
-            
-            # Close CloakBrowser context between stores to free resources
-            # (each store creates its own persistent context)
-        
+            finally:
+                elapsed = asyncio.get_event_loop().time() - start_ts
+                completed += 1
+                all_prices[name] = products
+                if run_id and error_msg:
+                    mark_store_error(run_id, query, name, error_msg)
+                logger.info("[%d/%d] %s done in %.1fs | products=%d | error=%s",
+                            completed, total_stores, name, elapsed, len(products), error_msg or "none")
+
         return all_prices

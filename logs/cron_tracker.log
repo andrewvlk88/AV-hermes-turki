@@ -1,0 +1,89 @@
+2026-06-21 06:54:17,814 [INFO] turk_pi.cron_tracker: === Turkí Price Watchdog run started | 6 queries ===
+2026-06-21 06:54:17,814 [INFO] turk_pi.cron_tracker: Starting query: 'בלוגה'
+2026-06-21 06:54:18,345 [INFO] httpx: HTTP Request: GET https://api.haturki.com/api/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94 "HTTP/1.1 200 OK"
+2026-06-21 06:54:19,451 [INFO] httpx: HTTP Request: GET https://pypi.org/pypi/cloakbrowser/json "HTTP/1.1 200 OK"
+2026-06-21 06:54:23,652 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping פאנקו → https://www.paneco.co.il/catalogsearch/result/?q=%D7%91%D7%9C%D7%95%D7%92%D7%94
+2026-06-21 06:54:29,902 [INFO] turk_pi.src.scrapers.unified_scraper: [1/18] פאנקו done in 10.6s | products=8 | error=none
+2026-06-21 06:54:31,182 [INFO] httpx: HTTP Request: GET https://www.banamashkaot.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:54:32,028 [INFO] httpx: HTTP Request: GET https://www.banamashkaot.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:54:32,044 [INFO] turk_pi.src.scrapers.unified_scraper: [2/18] בנא משקאות done in 2.1s | products=15 | error=none
+2026-06-21 06:54:39,012 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping היבואן → https://www.the-importer.co.il/catalogsearch/result/?q=%D7%91%D7%9C%D7%95%D7%92%D7%94
+2026-06-21 06:54:45,447 [INFO] turk_pi.src.scrapers.unified_scraper: [3/18] היבואן done in 13.4s | products=8 | error=none
+2026-06-21 06:54:45,705 [INFO] httpx: HTTP Request: GET https://www.wineroute.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:54:46,961 [INFO] httpx: HTTP Request: GET https://www.wineroute.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:54:46,976 [INFO] turk_pi.src.scrapers.unified_scraper: [4/18] דרך היין done in 1.5s | products=11 | error=none
+2026-06-21 06:54:53,457 [INFO] turk_pi.src.scrapers.unified_scraper: [5/18] שר המשקאות done in 6.5s | products=2 | error=none
+2026-06-21 06:54:59,688 [INFO] turk_pi.src.scrapers.unified_scraper: [6/18] אליאסי משקאות done in 6.2s | products=134 | error=none
+2026-06-21 06:55:00,271 [INFO] httpx: HTTP Request: GET https://ari-g.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:55:00,862 [INFO] httpx: HTTP Request: GET https://ari-g.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:55:00,892 [INFO] turk_pi.src.scrapers.unified_scraper: [7/18] ארי משקאות done in 1.2s | products=5 | error=none
+2026-06-21 06:55:01,961 [INFO] httpx: HTTP Request: GET https://www.liquor-store.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:55:02,474 [INFO] httpx: HTTP Request: GET https://www.liquor-store.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:55:02,489 [INFO] turk_pi.src.scrapers.unified_scraper: [8/18] Liquor Store done in 1.6s | products=8 | error=none
+2026-06-21 06:55:02,700 [INFO] httpx: HTTP Request: GET https://www.alcohome.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 301 Moved Permanently"
+2026-06-21 06:55:02,805 [INFO] httpx: HTTP Request: GET https://alcohome.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:55:02,875 [INFO] httpx: HTTP Request: GET https://www.alcohome.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 301 Moved Permanently"
+2026-06-21 06:55:02,950 [INFO] httpx: HTTP Request: GET https://alcohome.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:55:02,965 [INFO] turk_pi.src.scrapers.unified_scraper: [9/18] אלכוהום done in 0.5s | products=6 | error=none
+2026-06-21 06:55:04,609 [INFO] httpx: HTTP Request: GET https://www.hamesameach.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:55:05,346 [INFO] httpx: HTTP Request: GET https://www.hamesameach.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:55:05,362 [INFO] turk_pi.src.scrapers.unified_scraper: [10/18] משקאות המשמח done in 2.4s | products=6 | error=none
+2026-06-21 06:55:09,508 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping מנו וינו → https://www.manovino.co.il/Search/?q=%D7%91%D7%9C%D7%95%D7%92%D7%94
+2026-06-21 06:55:20,135 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping מנו וינו → https://www.manovino.co.il/collections/search?q=%D7%91%D7%9C%D7%95%D7%92%D7%94
+2026-06-21 06:55:30,699 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping מנו וינו → https://www.manovino.co.il/collections/all/%D7%91%D7%9C%D7%95%D7%92%D7%94
+2026-06-21 06:55:38,830 [INFO] turk_pi.src.scrapers.unified_scraper: [11/18] מנו וינו done in 33.5s | products=0 | error=none
+2026-06-21 06:55:42,031 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping בית המשקאות של אביב → https://www.avivdrinks.co.il/?s=%D7%91%D7%9C%D7%95%D7%92%D7%94&post_type=product
+2026-06-21 06:55:52,727 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping בית המשקאות של אביב → https://www.avivdrinks.co.il/search/result/?q=%D7%91%D7%9C%D7%95%D7%92%D7%94
+2026-06-21 06:56:00,875 [INFO] turk_pi.src.scrapers.unified_scraper: [12/18] בית המשקאות של אביב done in 22.0s | products=0 | error=none
+2026-06-21 06:56:04,686 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping Wine & More → https://www.wineandmore.co.il/Search/?q=%D7%91%D7%9C%D7%95%D7%92%D7%94
+2026-06-21 06:56:12,944 [INFO] turk_pi.src.scrapers.unified_scraper: [13/18] Wine & More done in 12.1s | products=0 | error=none
+2026-06-21 06:56:18,609 [INFO] turk_pi.src.scrapers.unified_scraper: [14/18] לגימה done in 5.7s | products=39 | error=none
+2026-06-21 06:56:19,213 [INFO] httpx: HTTP Request: GET https://www.coffeco.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:19,582 [INFO] httpx: HTTP Request: GET https://www.coffeco.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:19,599 [INFO] turk_pi.src.scrapers.unified_scraper: [15/18] Coffeco done in 1.0s | products=6 | error=none
+2026-06-21 06:56:25,586 [INFO] turk_pi.src.scrapers.unified_scraper: [16/18] Drinks4U done in 6.0s | products=0 | error=none
+2026-06-21 06:56:25,941 [INFO] httpx: HTTP Request: GET https://www.alcohol123.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:26,193 [INFO] httpx: HTTP Request: GET https://www.alcohol123.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:26,216 [INFO] turk_pi.src.scrapers.unified_scraper: [17/18] Alcohol123 done in 0.6s | products=1 | error=none
+2026-06-21 06:56:26,267 [INFO] httpx: HTTP Request: GET https://www.winehouse.co.il/?rest_route=/wc/store/products&search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:26,975 [INFO] httpx: HTTP Request: GET https://www.winehouse.co.il/wp-json/wc/store/products?search=%D7%91%D7%9C%D7%95%D7%92%D7%94&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:26,991 [INFO] turk_pi.src.scrapers.unified_scraper: [18/18] בית היין done in 0.8s | products=6 | error=none
+2026-06-21 06:56:27,005 [INFO] turk_pi.cron_tracker: Query 'בלוגה': 30 deals found
+2026-06-21 06:56:27,005 [INFO] turk_pi.cron_tracker: Starting query: 'רוסקי סטנדרט'
+2026-06-21 06:56:27,468 [INFO] httpx: HTTP Request: GET https://api.haturki.com/api/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98 "HTTP/1.1 200 OK"
+2026-06-21 06:56:32,577 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping פאנקו → https://www.paneco.co.il/catalogsearch/result/?q=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98
+2026-06-21 06:56:38,806 [INFO] turk_pi.src.scrapers.unified_scraper: [1/18] פאנקו done in 10.4s | products=2 | error=none
+2026-06-21 06:56:39,630 [INFO] httpx: HTTP Request: GET https://www.banamashkaot.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:40,338 [INFO] httpx: HTTP Request: GET https://www.banamashkaot.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:41,211 [INFO] httpx: HTTP Request: GET https://www.banamashkaot.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:41,930 [INFO] httpx: HTTP Request: GET https://www.banamashkaot.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:41,942 [INFO] turk_pi.src.scrapers.unified_scraper: [2/18] בנא משקאות done in 3.1s | products=8 | error=none
+2026-06-21 06:56:47,105 [INFO] turk_pi.src.scrapers.playwright_scrapers: Scraping היבואן → https://www.the-importer.co.il/catalogsearch/result/?q=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98
+2026-06-21 06:56:53,527 [INFO] turk_pi.src.scrapers.unified_scraper: [3/18] היבואן done in 11.6s | products=4 | error=none
+2026-06-21 06:56:53,636 [INFO] httpx: HTTP Request: GET https://www.wineroute.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:54,742 [INFO] httpx: HTTP Request: GET https://www.wineroute.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:54,836 [INFO] httpx: HTTP Request: GET https://www.wineroute.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:55,978 [INFO] httpx: HTTP Request: GET https://www.wineroute.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:56:55,991 [INFO] turk_pi.src.scrapers.unified_scraper: [4/18] דרך היין done in 2.5s | products=5 | error=none
+2026-06-21 06:57:02,503 [INFO] turk_pi.src.scrapers.unified_scraper: [5/18] שר המשקאות done in 6.5s | products=2 | error=none
+2026-06-21 06:57:08,713 [INFO] turk_pi.src.scrapers.unified_scraper: [6/18] אליאסי משקאות done in 6.2s | products=134 | error=none
+2026-06-21 06:57:09,281 [INFO] httpx: HTTP Request: GET https://ari-g.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:09,821 [INFO] httpx: HTTP Request: GET https://ari-g.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:10,369 [INFO] httpx: HTTP Request: GET https://ari-g.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:10,913 [INFO] httpx: HTTP Request: GET https://ari-g.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:10,926 [INFO] turk_pi.src.scrapers.unified_scraper: [7/18] ארי משקאות done in 2.2s | products=3 | error=none
+2026-06-21 06:57:11,706 [INFO] httpx: HTTP Request: GET https://www.liquor-store.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:12,190 [INFO] httpx: HTTP Request: GET https://www.liquor-store.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:12,766 [INFO] httpx: HTTP Request: GET https://www.liquor-store.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:13,289 [INFO] httpx: HTTP Request: GET https://www.liquor-store.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:13,302 [INFO] turk_pi.src.scrapers.unified_scraper: [8/18] Liquor Store done in 2.4s | products=6 | error=none
+2026-06-21 06:57:13,510 [INFO] httpx: HTTP Request: GET https://www.alcohome.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 301 Moved Permanently"
+2026-06-21 06:57:13,735 [INFO] httpx: HTTP Request: GET https://alcohome.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:13,802 [INFO] httpx: HTTP Request: GET https://www.alcohome.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 301 Moved Permanently"
+2026-06-21 06:57:13,878 [INFO] httpx: HTTP Request: GET https://alcohome.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:13,952 [INFO] httpx: HTTP Request: GET https://www.alcohome.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 301 Moved Permanently"
+2026-06-21 06:57:14,024 [INFO] httpx: HTTP Request: GET https://alcohome.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:14,094 [INFO] httpx: HTTP Request: GET https://www.alcohome.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 301 Moved Permanently"
+2026-06-21 06:57:14,166 [INFO] httpx: HTTP Request: GET https://alcohome.co.il/wp-json/wc/store/products?search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99&per_page=100 "HTTP/1.1 200 OK"
+2026-06-21 06:57:14,188 [INFO] turk_pi.src.scrapers.unified_scraper: [9/18] אלכוהום done in 0.9s | products=4 | error=none
+2026-06-21 06:57:17,120 [INFO] httpx: HTTP Request: GET https://www.hamesameach.co.il/?rest_route=/wc/store/products&search=%D7%A8%D7%95%D7%A1%D7%A7%D7%99%20%D7%A1%D7%98%D7%A0%D7%93%D7%A8%D7%98&per_page=100 "HTTP/1.1 200 OK"
