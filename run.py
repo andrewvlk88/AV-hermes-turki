@@ -21,7 +21,7 @@ from src.models import Store
 
 def progress_callback(name, count, msg):
     """Print a progress line for each store."""
-    print(f"   {msg}")
+    print(f"   {name}: {msg}")
 
 
 def normalize_for_matching(name: str) -> str:
