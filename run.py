@@ -14,6 +14,7 @@ from src.scrapers.api_scrapers import HaturkiAPIScraper
 from src.scrapers.unified_scraper import UnifiedScraper
 from src.export.csv_export import bulk_export
 from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, extract_volume_ml, is_relevant_volume
+from src.utils.llm_deals import llm_validate_deal
 from src.scrapers.playwright_scrapers import PlaywrightEngine
 
 from src.models import Store
@@ -300,11 +301,16 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
             savings = turki_match["price"] - cheapest["price"]
             pct = (savings / turki_match["price"]) * 100
             if pct >= 5:  # Only show meaningful savings (5%+)
-                lines.append(f"   💰 חיסכון: {savings:.0f}₪ ({pct:.0f}%)")
-            deals.append(
-                f"💰 {display_name} — {cheapest['price']:.0f}₪ ב-{cheapest['store']} "
-                f"(הטורקי {turki_match['price']:.0f}₪, חיסכון {pct:.0f}%)"
-            )
+                # LLM reasoning validation — only for candidate Turki deals
+                is_valid, reason = llm_validate_deal(display_name, cheapest["price"], turki_match["price"], query)
+                if not is_valid:
+                    lines.append(f"   ⚠️ נפסל ע" + "י LLM: " + reason)
+                else:
+                    lines.append(f"   💰 חיסכון: {savings:.0f}₪ ({pct:.0f}%)")
+                    deals.append(
+                        f"💰 {display_name} — {cheapest['price']:.0f}₪ ב-{cheapest['store']} "
+                        f"(הטורקי {turki_match['price']:.0f}₪, חיסכון {pct:.0f}%)"
+                    )
         
         for e in entries:
             if e["is_sale"]:
