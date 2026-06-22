@@ -1,23 +1,27 @@
-# Turkí Price Intelligence (v2.1.0) 🦃📊
+# Turkí Price Intelligence (v2.4.0) 🦃📊
 
-מנוע פייתון מתקדם להשוואת מחירי אלכוהול בזמן אמת ב-19 חנויות מובילות בישראל, המשתמש ב-**CloakBrowser (Stealth Chromium)** למעבר חומות Cloudflare/הגנות בוטים, שמירה מיידית ב-**SQLite**, ומערכת נירמול אלגוריתמית חכמה.
+מנוע פייתון מתקדם להשוואת מחירי אלכוהול בזמן אמת ב-20 חנויות מובילות בישראל, המשתמש ב-**CloakBrowser (Stealth Chromium)** למעבר חומות Cloudflare/הגנות בוטים, שמירה מיידית ב-**SQLite**, ומערכת נירמול אלגוריתמית חכמה.
 
 המערכת פותחה במיוחד עבור **הטורקי** כחנות Reference לצורך זיהוי פערי מחירים, מבצעים אגרסיביים ויצירת מודיעין תחרותי חצי-אוטומטי.
 
+**הלוגיקה הבסיסית:** הטורקי רץ ראשון (API מהיר) → מתקבל מחיר baseline → שאר 19 החנויות נסרקות ומושוות מולו → דילים = חנות שזולה מהטורקי ב-5%+. כל ריצה = צילום רענן, אין caching, אין זיכרון מריצה קודמת.
+
 ---
 
-## 🚀 תכונות מרכזיות (שדרוג 2.1.0)
+## 🚀 תכונות מרכזיות
 
 - **CloakBrowser Stealth Integration**: שימוש בדפדפן Chromium ייעודי הכולל 58 פאטצ'ים ברמת קוד המקור של C++ (ביטול `navigator.webdriver`, שינוי TLS fingerprint, הגדרת פלאגינים פיקטיביים) למעבר חלק של Cloudflare ו-reCAPTCHA באתרים מוגנים כמו פאנקו והיבואן.
-- **SQLite Database Architecture**: כל סריקה נשמרת בזמן אמת בטבלאות `price_results` ו-`store_status`. תוצאות חלקיות נשמרות גם אם חנויות אחרות נכשלות בריצה.
+- **SQLite Database Architecture**: כל סריקה נשמרת בזמן אמת בטבלאות `price_results` ו-`store_status`. תוצאות חלקיות נשמרות גם אם חנויות אחרות נכשלות בריצה. SQLite3 הוא חלק מ-stdlib של פייתון — אין צורך בהתקנה נפרדת.
 - **Tracked Products Suite (`manage_tracker.py`)**: כלי ניהול מובנה ב-CLI למעקב, הוספה, הסרה והרצה של סוויטת מוצרים נבחרים (וודקה בלוגה, רוסקי, קברנה סוביניון, ג'וני בלאק ועוד) לאיתור מבצעי פתאום.
+- **Cron Watchdog (`cron_tracker.py`)**: מנגנון עלות-אפס — סקריפט Python רץ כל שעתיים דרך Hermes Cron, שותק כשאין דילים, פורץ לטלגרם רק כשנמצא מבצע. ללא טוקנים מבוזבזים כשאין מה לדווח.
 - **Progressive Querying (WooCommerce & Magento REST APIs)**: מנגנון חיפוש דו-שלבי חכם עוקף מגבלות מנועי חיפוש קשיחים: מחפש קודם לפי 2 מילים, ובמידה ואין תוצאות, מבצע פולבק למילה הבודדת הראשונה (למשל מותג) ומבצע סינון ודפליקציה בתוך קוד הפייתון.
 - **Smart Hebrew Alias Normalization**: אלגוריתם ייחודי המזהה ומנרמל קיצורים ושגיאות כתיב נפוצים בעולם היין הישראלי:
-  * `"ק.ס"` / `"ק"ס"` / `"קס"` $\leftarrow$ `"קברנה סוביניון"` (התאמה מלאה של "ירדן ק.ס 2022" ל-"ירדן קברנה סוביניון 2022").
-  * `"ס.ב"` / `"ס"ב"` / `"סב"` $\leftarrow$ `"סוביניון בלאן"`.
-  * `"סובניון"` / `"סביניון"` $\leftarrow$ `"סוביניון"` (תיקון שגיאות כתיב של חנויות).
+  * `"ק.ס"` / `"ק"ס"` / `"קס"` ← `"קברנה סוביניון"` (התאמה מלאה של "ירדן ק.ס 2022" ל-"ירדן קברנה סוביניון 2022").
+  * `"ס.ב"` / `"ס"ב"` / `"סב"` ← `"סוביניון בלאן"`.
+  * `"סובניון"` / `"סביניון"` ← `"סוביניון"` (תיקון שגיאות כתיב של חנויות).
   * ניקוי קידומות מפריעות: `"יין"`, `"בקבוק של"`, `"מארז"`, `"וויסקי"`.
 - **Dynamic Relevance Thresholds**: סינון אוטומטי של מוצרים לא קשורים. שאילתות של 4+ מילים דורשות לפחות 3 התאמות מדויקות (מונע מ-"יין ירדן קברנה פרנק" להתאים ל-"ירדן קברנה סוביניון").
+- **Brand-Word Matching (v2.3+)**: מונע התאמות שווא מהטורקי API שמחזיר את כל המלאי (3682 מוצרים). דורש לפחות מילת מותג אחת (len > 2, לא STOP_WORD) שמתאימה. מספרים ("12", "700"), יחידות ("ml", "מל"), ותיאורים ("אורגינל", "שנים") לא נספרים כהתאמות מותג.
 
 ---
 
@@ -27,21 +31,30 @@
 turk-price-intelligence/
 ├── manage_tracker.py                   ← כלי ניהול סוויטת מעקב המוצרים (list, add, remove, run)
 ├── run.py                              ← CLI Entry point ראשי להרצת שאילתה ידנית
-├── config.yaml                         ← הגדרות וקישורים ל-19 החנויות הנסרקות
+├── cron_tracker.py                     ← סקריפט קרון שקט (watchdog) — רק דילים מודפסים
+├── config.yaml                         ← הגדרות וקישורים ל-20 החנויות הנסרקות
 ├── requirements.txt                    ← תלויות פייתון
+├── .gitignore                          ← דילוג venv/, data/, logs/, .env, *.png
 ├── src/
 │   ├── models.py                       ← Pydantic Models (ProductPrice, Store, PriceReport)
-│   ├── logger.py                       
+│   ├── logger.py                       ← לוגר מותאם
+│   ├── agents/
+│   │   ├── searcher.py                 ← Searcher Agent (Playwright + requests)
+│   │   ├── analyzer.py                 ← אנליזת תוצאות
+│   │   └── extractor.py                ← חילוץ נתונים
+│   ├── export/
+│   │   └── csv_export.py               ← ייצוא CSV השוואתי ומעקב היסטורי
 │   ├── scrapers/
-│   │   ├── unified_scraper.py          ← מנוע הפיצול הראשי, פילטרים, ו-WooCommerce/Magento APIs
-│   │   ├── api_scrapers.py             ← API חנות הטורקי ישירות
-│   │   ├── html_scrapers.py            ← Fallback HTML Scrapers המבוססים על CloakBrowser
-│   │   └── playwright_scrapers.py      ← סקראפרים ייעודיים ל-Magento (פאנקו, היבואן) ו-JS heavy
+│   │   ├── unified_scraper.py          ← מנוע הפיצול הראשי, WooCommerce/Magento APIs, HTMLFallback
+│   │   ├── api_scrapers.py             ← API חנות הטורקי ישירות + GenericAPIScraper + Factory
+│   │   ├── html_scrapers.py            ← Fallback HTML Scrapers (MagentoHTML, SarHascraper)
+│   │   └── playwright_scrapers.py      ← סקראפרים ייעודיים ל-JS heavy (PlaywrightEngine, GenericPlaywright)
 │   ├── storage/
-│   │   └── sqlite_store.py             ← לוגיקת SQLite (חיבור, יצירת טבלאות ושמירת נתונים)
+│   │   └── sqlite_store.py             ← לוגיקת SQLite (init_db, save_store_result, get_db, mark_store_*)
 │   └── utils/
-│       └── filters.py                  ← פילטרים אלגוריתמיים, ניקוי שמות, נרמול וסינון
-└── data/                               ← תיקיית תוצאות ודוחות (נוצרת אוטומטית)
+│       └── filters.py                  ← פילטרים אלגוריתמיים, ניקוי שמות, נרמול, סינון, STOP_WORDS
+├── tests/                              ← בדיקות ידניות (לא pytest — סקריפטים עצמאיים)
+└── data/                               ← תיקיית תוצאות ודוחות (נוצרת אוטומטית, לא ב-git)
     ├── price_intel.db                  ← בסיס הנתונים הראשי של SQLite
     ├── *.json                          ← דוחות גולמיים
     ├── *.txt                           ← דוחות קריאים המותאמים למשלוח בטלגרם
@@ -52,7 +65,18 @@ turk-price-intelligence/
 
 ## 🛠️ התקנה ודרישות קדם
 
-המערכת רצה על סביבת לינוקס ודורשת דפדפן Chromium מותקן.
+המערכת רצה על סביבת לינוקס (Python 3.10+) ודורשת דפדפן Chromium מותקן.
+
+### תלויות מערכת
+
+```bash
+# Ubuntu/Debian — Chromium עבור CloakBrowser/Playwright
+sudo apt install -y chromium-browser
+# או דרך Playwright (מומלץ):
+# playwright install chromium
+```
+
+### התקנת פייתון
 
 ```bash
 # שכפול הריפו וכניסה לתיקייה
@@ -63,13 +87,17 @@ cd turk-price-intelligence
 python3 -m venv venv
 source venv/bin/activate
 
-# התקנת חבילות פייתון (כולל CloakBrowser)
+# התקנת כל החבילות (כולל CloakBrowser, PyYAML, וכל השאר)
 pip install -r requirements.txt
-pip install cloakbrowser
 
 # התקנת מנוע Playwright ב-Venv
 playwright install chromium
+
+# ווידוא ש-SQLite זמין (מובנה בפייתון, לא דורש התקנה)
+python3 -c "import sqlite3; print(f'SQLite {sqlite3.sqlite_version} ✅')"
 ```
+
+> **הערה:** SQLite3 הוא חלק מ-stdlib של פייתון מגרסה 2.5+. אין צורך ב-`pip install` או התקנה נפרדת. קובץ ה-DB (`data/price_intel.db`) נוצר אוטומטית בריצה הראשונה.
 
 ---
 
@@ -108,17 +136,42 @@ python run.py "וודקה בלוגה ליטר"
 python run.py "בלוגה" --agent-mode
 ```
 
+### 3. קרון Watchdog יומי (`cron_tracker.py`)
+
+רץ אוטומטית כל שעתיים דרך Hermes Cron. **עקרון Watchdog**: שקט מוחלט כשאין דילים, פריצה לטלגרם רק כשנמצא מבצע.
+
+**ארכיטקטורת עלות-אפס:**
+```
+[Python חינם — 0 טוקנים]
+  run_daily_tracker.sh → cron_tracker.py
+  סריקה → השוואה מול הטורקי → דילים
+        ↓
+[LLM — טוקנים]
+  רק אם יש דילים → סיכום קצר בעברית → טלגרם
+        ↓
+[שקט מוחלט אם אין דילים]
+```
+
 ---
 
-## 🕷️ ארכיטקטורת הסקראפינג (19 חנויות)
+## 🕷️ ארכיטקטורת הסקראפינג (20 חנויות)
 
 | רמת סריקה | מנוע טכנולוגי | חנויות נסרקות | יתרונות ושיקולים |
 |-----------|---------------|---------------|------------------|
-| **1. REST API** | HTTPS ישיר | **הטורקי (API)** | מהירות שיא (~200ms), אינו דורש הפעלת דפדפן. |
-| **2. WooCommerce Store API** | HTTP requests מנורמלים | **בנא, דרך היין, ארי משקאות, Liquor Store, אלכוהום, משקאות המשמח, Coffeco, Alcohol123, בית היין** | מהיר ויציב ביותר. עבר שדרוג לתמיכה בחיפוש פרוגרסיבי דו-שלבי וקיבולת של 100 מוצרים לתוצאה. |
-| **3. CloakBrowser + Magento Extractor** | Stealth Chromium + Beautiful Soup | **פאנקו, היבואן** | מעקף מוחלט של Cloudflare. שימוש במחלץ סלקטורים מותאם אישית למבנה Magento (תומך ב-`div.product-item` וב-`li.product`). |
-| **4. CloakBrowser HTML Fallback** | Stealth Chromium | **אליאסי משקאות, לגימה, שר המשקאות, Drinks4U** | טעינה בטוחה של ה-HTML המרונדר דרך דפדפן CloakBrowser עם בידוד סשנים מלא לכל חנות. |
-| **5. Playwright Render Engine** | CloakBrowser Page Context | **מנו וינו, בית המשקאות של אביב, Wine & More** | אתרי SPA מורכבים במיוחד מבוססי JS/Shopify הדורשים המתנה ארוכה לרנדור הנתונים. |
+| **1. REST API** | HTTPS ישיר | **הטורקי (API)** | מהירות שיא (~200ms), אינו דורש הפעלת דפדפן. מחזיר את כל המלאי — דורש פילטרים קפדניים. |
+| **2. WooCommerce Store API** | HTTP requests מנורמלים | **בנא, דרך היין, ארי משקאות, Liquor Store, אלכוהום, משקאות המשמח, Coffeco, Alcohol123, בית היין** | מהיר ויציב ביותר. חיפוש פרוגרסיבי דו-שלבי וקיבולת של 100 מוצרים לתוצאה. |
+| **3. CloakBrowser + Magento Extractor** | Stealth Chromium + Beautiful Soup | **פאנקו, היבואן** | מעקף מוחלט של Cloudflare. סלקטורים מותאמים ל-Magento (`div.product-item` ו-`li.product`). |
+| **4. CloakBrowser HTML Fallback** | Stealth Chromium | **אליאסי משקאות, לגימה, שר המשקאות, Drinks4U** | טעינת HTML מרונדר דרך CloakBrowser עם בידוד סשנים מלא לכל חנות. |
+| **5. Playwright Render Engine** | CloakBrowser Page Context | **מנו וינו, בית המשקאות של אביב, Wine & More** | אתרי SPA מורכבים מבוססי JS/Shopify הדורשים המתנה ארוכה לרנדור. |
+
+---
+
+## 🗄️ SQLite Database
+
+- **מיקום**: `data/price_intel.db` (נוצר אוטומטית, לא ב-git)
+- **טבלאות**: `price_results` (מוצרים שנמצאו), `store_status` (סטטוס ריצה לכל חנות)
+- **מחיר אפקטיבי**: `COALESCE(sale_price, regular_price)` — אין עמודת `price` יחידה
+- **מפתח ריצה**: כל ריצה מקבל `run_id` ייחודי. שליפת תוצאות: `SELECT MAX(run_id) FROM price_results WHERE query = ?`
 
 ---
 
@@ -127,4 +180,16 @@ python run.py "בלוגה" --agent-mode
 1. **הרצה סדרתית בלבד**: CloakBrowser מקים תהליך Chromium שלם לכל חנות מבוססת דפדפן. ניסיונות להריץ במקביל יובילו לנעילת קבצי Session, צריכת זיכרון מופרזת וקריסת המנוע.
 2. **דילוג על פופאפ גיל באתרי Magento**: פופאפ אימות הגיל ("אני מעל 18") באתרי פאנקו והיבואן גורם ללחיצה שגויה ב-JavaScript שמפנה לדפי קוקטיילים שבורים. הקוד מדלג אוטומטית על מנגנון הטיפול בפופאפ גיל בחנויות אלו.
 3. **עבודה ללא persistent context**: שימוש ב-Session שמור קבוע גרם לפאנקו לטעון עוגיות ישנות ולהחזיר מוצרים לא קשורים. המנוע יוצר מופע נפרד ונקי (`launch_async`) לכל חנות וסוגר אותו מיד בסיום.
-4. **מניעת שגיאות הרשאות Git**: דחיפת שינויים ל-GitHub עשויה להיכשל עם שגיאת 403 במקרה של Token פג תוקף. במקרה כזה יש לבצע רענון הרשאות באמצעות ה-GitHub CLI.
+4. **www redirect בארי משקאות**: `www.ari-g.co.il` מבצע 301 redirect ל-`ari-g.co.il` (ללא www). חובה להשתמש בכתובת ללא www ב-`config.yaml`.
+5. **הטורקי API מחזיר את כל המלאי (3682 מוצרים)**: ה-API לא מסנן server-side. בלי פילטרים קפדניים, "וודקה נמירוף אורגינל 700 מל" עובר כהתאמה ל"גלנמורנג'י 12 אורגינל 700 מל". הפתרון: `is_relevant_product` דורש לפחות מילת מותג אחת (len > 2, לא STOP_WORD) שמתאימה.
+6. **רגקס בעברית — סוגריים לא מאוזנים**: `re.sub(r'\[^)]*\)', ...)` קורס עם `re.error: unbalanced parenthesis` כשיש תווים עבריים. התחביר הנכון: `re.sub(r'\([^)]*\)', '', name)`.
+7. **אליאסי משקאות מחזיר פסולת**: ה-extractor הגנרי תופס "מארז מתנה קרטון מהודר" ב-₪12.9 כמוצר. מילים כמו "מארז מתנה", "קרטון", "סירופ", "סאקה", "מיקס", "מונין" נוספו ל-`ACCESSORY_KEYWORDS` ב-`filters.py`.
+8. **תמיד להציג תוצאות מול baseline של הטורקי**: רשימת מוצרים בלי השוואה לטורקי = חסרת ערך. דיל = זול מהטורקי ב-5%+.
+9. **אורך ריצה**: סריקה מלאה של 6 מוצרים × 20 חנויות = ~14-15 דקות. תכנן בהתאם ל-timeout של קרונים.
+10. **מניעת שגיאות הרשאות Git**: דחיפת שינויים ל-GitHub עשויה להיכשל עם שגיאת 403 במקרה של Token פג תוקף. במקרה כזה יש לבצע רענון הרשאות באמצעות ה-GitHub CLI.
+
+---
+
+## 📜 License
+
+Personal project — Andrew Volkov (@andrewvlk88)

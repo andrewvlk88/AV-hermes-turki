@@ -33,3 +33,17 @@ debug_*.png
 
 # Environment
 .env
+
+# Logs
+logs/
+*.log
+tracker_run.log
+
+# Empty/stale DB
+prices.db
+
+# Pycache
+__pycache__/
+
+# Cron wrapper (lives in ~/.hermes/scripts/)
+run_daily_tracker.sh
