@@ -161,12 +161,12 @@ def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
     return None
 
 
-async def search_all(query: str) -> dict:
+async def search_all(query: str, run_id: str = None) -> dict:
     """Search ALL stores — Haturki API first, then rest sequentially."""
     from src.storage.sqlite_store import init_db, save_store_result, run_id_gen
     
     init_db()
-    run_id = run_id_gen()
+    run_id = run_id or run_id_gen()
     
     # 1. Haturki API (fastest)
     _print(f"\n🦃 הטורקי (API)...")
@@ -348,6 +348,8 @@ def format_telegram(report: PriceReport) -> str:
 
 async def async_main(queries: List[str], output_dir: str = "data"):
     """Run search for all queries. Returns the last PriceReport for --json output."""
+    from src.storage.sqlite_store import run_id_gen
+    shared_run_id = run_id_gen()
     last_report = None
     try:
         for query in queries:
@@ -355,8 +357,8 @@ async def async_main(queries: List[str], output_dir: str = "data"):
             _print(f"🔎 *{query}*")
             _print(f"{'='*50}")
             
-            # Search all stores
-            all_prices = await search_all(query)
+            # Search all stores with the shared run ID
+            all_prices = await search_all(query, run_id=shared_run_id)
             
             # Build report
             _print(f"\n📊 בונים דוח...")

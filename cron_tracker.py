@@ -223,14 +223,14 @@ class SmartAnalyzer:
         return lines
 
 
-async def run_single_query(query: str, analyzer: SmartAnalyzer) -> Tuple[List[Dict], List[str]]:
+async def run_single_query(query: str, analyzer: SmartAnalyzer, run_id: str = None) -> Tuple[List[Dict], List[str]]:
     """Run a single tracked query and return analyzed deals."""
     run.SILENT = True
     init_db()
 
-    logger.info("Starting query: %r", query)
+    logger.info("Starting query: %r run_id=%s", query, run_id)
     try:
-        all_prices = await asyncio.wait_for(search_all(query), timeout=RUN_TIMEOUT_SECONDS)
+        all_prices = await asyncio.wait_for(search_all(query, run_id=run_id), timeout=RUN_TIMEOUT_SECONDS)
         deals, anomalies = analyzer.analyze_query(all_prices, query)
         logger.info("Query %r: %d deals, %d anomalies", query, len(deals), len(anomalies))
         return deals, anomalies
@@ -264,6 +264,8 @@ async def main(json_output: bool = False):
         return
 
     logger.info("=== Turkí Smart Watchdog run started | %d queries ===", len(queries))
+    from src.storage.sqlite_store import run_id_gen
+    shared_run_id = run_id_gen()
 
     analyzer = SmartAnalyzer()
     all_deals = []
@@ -272,7 +274,7 @@ async def main(json_output: bool = False):
 
     try:
         for query in queries:
-            deals, anomalies = await run_single_query(query, analyzer)
+            deals, anomalies = await run_single_query(query, analyzer, run_id=shared_run_id)
             all_deals.extend(deals)
             all_anomalies.extend(anomalies)
             per_query_stats.append({

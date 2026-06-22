@@ -371,15 +371,39 @@ def main():
             unsafe_allow_html=True,
         )
 
-    # ── Filtered Datasets ──
+    # ── Filtered Datasets with Smart Fallback ──
     run_prices = price_df[
         (price_df["run_id"] == selected_run) &
         (price_df["query"] == selected_query)
     ]
-    run_status = status_df[
-        (status_df["run_id"] == selected_run) &
-        (status_df["query"] == selected_query)
-    ]
+    
+    is_fallback = False
+    fallback_run_name = ""
+    run_status = pd.DataFrame()
+    
+    if run_prices.empty:
+        query_runs = price_df[price_df["query"] == selected_query]["run_id"].unique()
+        if len(query_runs) > 0:
+            fallback_run = query_runs[0]
+            fallback_run_name = fallback_run[:19]
+            run_prices = price_df[
+                (price_df["run_id"] == fallback_run) &
+                (price_df["query"] == selected_query)
+            ]
+            run_status = status_df[
+                (status_df["run_id"] == fallback_run) &
+                (status_df["query"] == selected_query)
+            ]
+            is_fallback = True
+    else:
+        run_status = status_df[
+            (status_df["run_id"] == selected_run) &
+            (status_df["query"] == selected_query)
+        ]
+
+    # Show fallback info banner if needed
+    if is_fallback:
+        st.info(f"ℹ️ המוצר לא נסרק בסבב שנבחר. מציג נתונים מסבב אחרון זמין: {fallback_run_name}")
 
     # Find Haturki Baseline price
     turki_price_row = run_prices[run_prices["store_name"] == "הטורקי"]
