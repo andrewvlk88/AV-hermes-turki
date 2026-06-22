@@ -214,7 +214,10 @@ def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bo
 
 
 def extract_volume_ml(name: str) -> Optional[float]:
-    """Extract volume in ml from a product name, handling Hebrew and English formats."""
+    """Extract volume in ml from a product name, handling Hebrew and English formats.
+    
+    Handles standalone 'ליטר' (implies 1000ml) and 'חצי ליטר' (implies 500ml).
+    """
     if not name:
         return None
     
@@ -237,5 +240,25 @@ def extract_volume_ml(name: str) -> Optional[float]:
                 return float(m.group(1)) * multiplier
             except ValueError:
                 pass
+    
+    # "חצי ליטר" — implies 500ml (check BEFORE standalone ליטר)
+    if re.search(r'חצי\s*ליטר', name):
+        return 500.0
+    
+    # Standalone "ליטר" without a number prefix — implies 1000ml
+    # e.g., "רוסקי סטנדרט פלטינום ליטר" or "בלוגה נובל ליטר"
+    if re.search(r'\bליטר\b', name):
+        return 1000.0
+    
+    # ── LLM Fallback ──
+    # If regex failed to extract volume, try Gemini 2.5 Flash
+    # This handles edge cases like "מיני", "פוקס", "מארז", etc.
+    try:
+        from src.utils.llm_volume import llm_extract_volume
+        vol = llm_extract_volume(name)
+        if vol is not None and vol > 0:
+            return vol
+    except Exception:
+        pass
     
     return None

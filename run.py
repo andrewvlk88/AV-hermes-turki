@@ -91,9 +91,12 @@ def get_volume_key(name: str) -> float | None:
 def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
     """Find the best matching turki product for a given normalized key.
     
-    Requires exact match on normalized name (without volume).
-    Falls back to prefix match only if both share the same volume category
-    and the prefix is at least 10 chars.
+    STRICT volume matching: if either the product or the turki entry has
+    a known volume, they must be within ±50ml. If both are unknown, we
+    allow name-only match (rare case where neither store specifies volume).
+    
+    This prevents false deals like comparing a 200ml bottle (₪25) against
+    a 1L bottle (₪65) just because the names normalize the same way.
     """
     if not turki_lookup:
         return None
@@ -101,15 +104,7 @@ def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
     # Extract the name part (before the volume suffix)
     name_part = name_key.rsplit('_', 1)[0] if '_' in name_key else name_key
     
-    # Try exact match first (name + volume)
-    if name_key in turki_lookup:
-        return turki_lookup[name_key]
-    
-    # Try name-only match (for products without volume info)
-    if name_part in turki_lookup:
-        return turki_lookup[name_part]
-    
-    # Extract target volume for matching
+    # Extract target volume
     target_vol = 0
     try:
         vol_str = name_key.rsplit('_', 1)[1]
@@ -118,41 +113,56 @@ def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
     except (ValueError, IndexError):
         pass
     
-    # Try matching by name only — but ONLY if volumes are similar (±50ml)
-    # This handles cases like "product 700ml" matching "product (700ml)"
+    # Try exact match first (name + volume)
+    if name_key in turki_lookup:
+        return turki_lookup[name_key]
+    
+    # Try all turki entries — STRICT volume check
     for tk, tv in turki_lookup.items():
         tk_name = tk.rsplit('_', 1)[0] if '_' in tk else tk
-        if tk_name == name_part:
-            # Check volume proximity
-            try:
-                tk_vol = float(tk.rsplit('_', 1)[1])
-                if abs(tk_vol - target_vol) < 50:
-                    return tv
-            except (ValueError, IndexError):
-                # If we can't parse volume from turki key, skip this fallback
-                continue
+        if tk_name != name_part:
+            continue
+        
+        # Parse turki volume
+        tk_vol = 0
+        try:
+            tk_vol_str = tk.rsplit('_', 1)[1]
+            if tk_vol_str != "unknown":
+                tk_vol = float(tk_vol_str)
+        except (ValueError, IndexError):
+            pass
+        
+        # Volume matching rules:
+        # - Both known: must be within ±50ml
+        # - One known, one unknown: REJECT (can't compare 200ml vs unknown)
+        # - Both unknown: allow (rare, but neither specifies volume)
+        
+        if target_vol > 0 and tk_vol > 0:
+            # Both have volume — check proximity
+            if abs(tk_vol - target_vol) < 50:
+                return tv
+        elif target_vol == 0 and tk_vol == 0:
+            # Both unknown — allow name-only match
+            return tv
+        # else: one known, one unknown — REJECT (skip this turki entry)
     
-    # No exact match — only match by prefix if volumes are in same ballpark
-    # (±50ml) and the turki name words are a subset of the product name words
-    # (i.e., product "ג׳ דניאלס מאסטר" should NOT match turki "ג׳ דניאלס" 
-    #  because the turki has FEWER words — it's a different product)
-    # We only allow match if the QUERY product has FEWER or EQUAL words to the turki
-    # i.e., turki "ג׳ דניאלס דבש" can match product "ג׳ דניאלס דבש" but not "ג׳ דניאלס מאסטר"
+    # Prefix matching with strict volume check (for slightly different name spellings)
     if len(name_part) >= 10 and target_vol > 0:
         for tk, tv in turki_lookup.items():
             tk_name = tk.rsplit('_', 1)[0] if '_' in tk else tk
             tk_vol = 0
             try:
-                tk_vol = float(tk.rsplit('_', 1)[1])
+                tk_vol_str = tk.rsplit('_', 1)[1]
+                if tk_vol_str != "unknown":
+                    tk_vol = float(tk_vol_str)
             except (ValueError, IndexError):
                 pass
             
             # Only match if volumes are similar
-            if abs(tk_vol - target_vol) >= 50:
+            if tk_vol == 0 or abs(tk_vol - target_vol) >= 50:
                 continue
             
             # Product name words must be a subset of turki name words
-            # (product can be missing words from turki, but not have extra words)
             product_words = set(name_part.split())
             turki_words = set(tk_name.split())
             if product_words.issubset(turki_words):
