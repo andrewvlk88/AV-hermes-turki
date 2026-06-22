@@ -271,10 +271,13 @@ def load_data():
     price_df = pd.read_sql_query("SELECT * FROM price_results ORDER BY timestamp DESC", conn)
     
     # Final guard: drop 200ml/500ml products from dashboard display
-    price_df = price_df[price_df.apply(
-        lambda row: is_relevant_volume(row['volume_ml']) if pd.notna(row['volume_ml']) else is_relevant_volume(extract_volume_ml(row['product_name'])),
-        axis=1
-    )]
+    try:
+        price_df = price_df[price_df.apply(
+            lambda row: is_relevant_volume(row['volume_ml']) if pd.notna(row['volume_ml']) else is_relevant_volume(extract_volume_ml(row['product_name'])),
+            axis=1
+        )]
+    except Exception:
+        pass
     
     status_df = pd.read_sql_query("SELECT * FROM store_status ORDER BY timestamp DESC", conn)
     tracked_df = pd.read_sql_query("SELECT * FROM tracked_queries ORDER BY id", conn)
@@ -294,6 +297,26 @@ def load_data():
 
     conn.close()
     return price_df, status_df, tracked_df, health_df, deals_df, history_df
+
+
+def load_data_with_retry(max_attempts=5, delay=0.5):
+    """Load data with retry on database lock (WAL readers may clash)."""
+    import time
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            return load_data.__wrapped__()
+        except Exception as e:
+            last_error = e
+            if "locked" in str(e).lower() and attempt < max_attempts - 1:
+                time.sleep(delay * (2 ** attempt))
+                continue
+            raise
+    raise last_error
+
+
+# Apply the retry wrapper over the cached loader
+load_data = st.cache_data(ttl=15)(load_data_with_retry)
 
 
 def apply_cyber_theme(fig, title=""):

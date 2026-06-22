@@ -24,10 +24,24 @@ def run_id_gen() -> str:
 def get_db() -> sqlite3.Connection:
     """Get a connection to the price intelligence SQLite DB."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")  # wait up to 30s before failing
     return conn
+
+
+def _with_retry(fn, max_attempts=5, delay=1.0):
+    """Retry a DB operation with exponential backoff on OperationalError."""
+    import time
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_attempts - 1:
+                time.sleep(delay * (2 ** attempt))
+                continue
+            raise
 
 
 def init_db():
