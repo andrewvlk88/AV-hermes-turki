@@ -488,10 +488,10 @@ def main():
             # Details Table
             st.markdown("### טבלת נתונים מפורטת")
             st.dataframe(
-                run_prices[[
+                run_prices.sort_values("effective_price")[[
                     "store_name", "product_name", "regular_price",
                     "sale_price", "is_on_sale", "product_url"
-                ]].sort_values("effective_price"),
+                ]],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
