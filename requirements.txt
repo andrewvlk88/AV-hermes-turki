@@ -24,3 +24,8 @@ rich>=13.0.0
 
 # File locking (cron safety)
 filelock>=3.13.0
+
+# Dashboard
+streamlit>=1.30.0
+plotly>=5.18.0
+pandas>=2.0.0

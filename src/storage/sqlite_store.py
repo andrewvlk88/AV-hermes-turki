@@ -67,6 +67,73 @@ def init_db():
         );
         
         CREATE INDEX IF NOT EXISTS idx_status_run ON store_status(run_id);
+        
+        -- ── v2.4: Historical price tracking ──
+        CREATE TABLE IF NOT EXISTS price_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            store_name TEXT NOT NULL,
+            query TEXT NOT NULL,
+            regular_price REAL,
+            sale_price REAL,
+            volume_ml REAL,
+            is_on_sale INTEGER DEFAULT 0,
+            recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+            run_id TEXT NOT NULL
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_history_product ON price_history(product_name);
+        CREATE INDEX IF NOT EXISTS idx_history_store ON price_history(store_name);
+        CREATE INDEX IF NOT EXISTS idx_history_date ON price_history(recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_history_query ON price_history(query);
+        
+        -- ── v2.4: Deal scoring (best deals across all runs) ──
+        CREATE TABLE IF NOT EXISTS deal_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            store_name TEXT NOT NULL,
+            query TEXT NOT NULL,
+            price REAL NOT NULL,
+            turki_price REAL,
+            savings_amount REAL,
+            savings_percent REAL,
+            score REAL NOT NULL DEFAULT 0,
+            -- score = savings_percent * weight (higher = better deal)
+            deal_type TEXT NOT NULL DEFAULT 'turki',
+            -- turki, sale, anomaly
+            run_id TEXT NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_deal_product ON deal_scores(product_name);
+        CREATE INDEX IF NOT EXISTS idx_deal_store ON deal_scores(store_name);
+        CREATE INDEX IF NOT EXISTS idx_deal_score ON deal_scores(score DESC);
+        CREATE INDEX IF NOT EXISTS idx_deal_date ON deal_scores(recorded_at);
+        
+        -- ── v2.4: Scraper health metrics ──
+        CREATE TABLE IF NOT EXISTS scraper_health (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            query TEXT NOT NULL,
+            stores_checked INTEGER DEFAULT 0,
+            stores_responded INTEGER DEFAULT 0,
+            response_rate REAL DEFAULT 0,
+            -- stores_responded / stores_checked
+            deal_count INTEGER DEFAULT 0,
+            anomaly_count INTEGER DEFAULT 0,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_health_run ON scraper_health(run_id);
+        CREATE INDEX IF NOT EXISTS idx_health_query ON scraper_health(query);
+        CREATE INDEX IF NOT EXISTS idx_health_date ON scraper_health(timestamp);
+        
+        -- ── v2.4: Tracked queries (if not exists from manage_tracker) ──
+        CREATE TABLE IF NOT EXISTS tracked_queries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT NOT NULL UNIQUE,
+            added_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
     """)
     conn.commit()
     conn.close()
