@@ -1,4 +1,4 @@
-# Turkí Price Intelligence (v2.4.0) 🦃📊
+# AV Hermes Turki — Turkí Price Intelligence (v2.5.0) 🦃📊
 
 מנוע פייתון מתקדם להשוואת מחירי אלכוהול בזמן אמת ב-20 חנויות מובילות בישראל, המשתמש ב-**CloakBrowser (Stealth Chromium)** למעבר חומות Cloudflare/הגנות בוטים, שמירה מיידית ב-**SQLite**, ומערכת נירמול אלגוריתמית חכמה.
 
@@ -6,12 +6,15 @@
 
 **הלוגיקה הבסיסית:** הטורקי רץ ראשון (API מהיר) → מתקבל מחיר baseline → שאר 19 החנויות נסרקות ומושוות מולו → דילים = חנות שזולה מהטורקי ב-5%+. כל ריצה = צילום רענן, אין caching, אין זיכרון מריצה קודמת.
 
+> **Repo נוכחי:** `https://github.com/andrewvlk88/AV-hermes-turki`
+
 ---
 
 ## 🚀 תכונות מרכזיות
 
 - **CloakBrowser Stealth Integration**: שימוש בדפדפן Chromium ייעודי הכולל 58 פאטצ'ים ברמת קוד המקור של C++ (ביטול `navigator.webdriver`, שינוי TLS fingerprint, הגדרת פלאגינים פיקטיביים) למעבר חלק של Cloudflare ו-reCAPTCHA באתרים מוגנים כמו פאנקו והיבואן.
-- **SQLite Database Architecture**: כל סריקה נשמרת בזמן אמת בטבלאות `price_results` ו-`store_status`. תוצאות חלקיות נשמרות גם אם חנויות אחרות נכשלות בריצה. SQLite3 הוא חלק מ-stdlib של פייתון — אין צורך בהתקנה נפרדת.
+- **SQLite Database Architecture**: כל סריקה נשמרת בזמן אמת בטבלאות `price_results`, `price_history`, `deal_scores`, ו-`scraper_health`. תוצאות חלקיות נשמרות גם אם חנויות אחרות נכשלות בריצה. SQLite3 הוא חלק מ-stdlib של פייתון — אין צורך בהתקנה נפרדת.
+- **Streamlit Dashboard (`dashboard.py`)**: דשבורד RTL חי ב-`turki.avolkov.click` המציג רק את הריצה האחרונה, עם בחירת מוצר, השוואה לטורקי, וזיהוי דילים בצבע Hermes Teal.
 - **Tracked Products Suite (`manage_tracker.py`)**: כלי ניהול מובנה ב-CLI למעקב, הוספה, הסרה והרצה של סוויטת מוצרים נבחרים (וודקה בלוגה, רוסקי, קברנה סוביניון, ג'וני בלאק ועוד) לאיתור מבצעי פתאום.
 - **Cron Watchdog (`cron_tracker.py`)**: מנגנון עלות-אפס — סקריפט Python רץ כל שעתיים דרך Hermes Cron, שותק כשאין דילים, פורץ לטלגרם רק כשנמצא מבצע. ללא טוקנים מבוזבזים כשאין מה לדווח.
 - **Progressive Querying (WooCommerce & Magento REST APIs)**: מנגנון חיפוש דו-שלבי חכם עוקף מגבלות מנועי חיפוש קשיחים: מחפש קודם לפי 2 מילים, ובמידה ואין תוצאות, מבצע פולבק למילה הבודדת הראשונה (למשל מותג) ומבצע סינון ודפליקציה בתוך קוד הפייתון.
@@ -22,6 +25,9 @@
   * ניקוי קידומות מפריעות: `"יין"`, `"בקבוק של"`, `"מארז"`, `"וויסקי"`.
 - **Dynamic Relevance Thresholds**: סינון אוטומטי של מוצרים לא קשורים. שאילתות של 4+ מילים דורשות לפחות 3 התאמות מדויקות (מונע מ-"יין ירדן קברנה פרנק" להתאים ל-"ירדן קברנה סוביניון").
 - **Brand-Word Matching (v2.3+)**: מונע התאמות שווא מהטורקי API שמחזיר את כל המלאי (3682 מוצרים). דורש לפחות מילת מותג אחת (len > 2, לא STOP_WORD) שמתאימה. מספרים ("12", "700"), יחידות ("ml", "מל"), ותיאורים ("אורגינל", "שנים") לא נספרים כהתאמות מותג.
+- **Strict Volume Matching + 200ml/500ml Filter (v2.5+)**: בקבוקונים של 200ml ו-500ml/חצי-ליטר מסוננים לגמרי — הם לא רלוונטיים להשוואת מחירים מול הטורקי ולא מופיעים בדוח או בדשבורד.
+- **LLM Volume Fallback (v2.5+)**: כשרגקס לא מחלץ נפח (למשל "פלטינום ליטר" או "מיני"), DeepSeek V4 Flash דרך Ollama Cloud קובע את הנפח. רגקס ראשי, LLM רק למקרי קצה.
+- **Tavily Web Extraction (v2.5+)**: חילוץ תוכן מ-URL מהיר ואמין עבור חיפושים ברשת (לוז משחקים, מידע עדכני) — 1,000 קריאות/חודש בחינם.
 
 ---
 
@@ -32,6 +38,7 @@ turk-price-intelligence/
 ├── manage_tracker.py                   ← כלי ניהול סוויטת מעקב המוצרים (list, add, remove, run)
 ├── run.py                              ← CLI Entry point ראשי להרצת שאילתה ידנית
 ├── cron_tracker.py                     ← סקריפט קרון שקט (watchdog) — רק דילים מודפסים
+├── dashboard.py                        ← דשבורד Streamlit חי (turki.avolkov.click)
 ├── config.yaml                         ← הגדרות וקישורים ל-20 החנויות הנסרקות
 ├── requirements.txt                    ← תלויות פייתון
 ├── .gitignore                          ← דילוג venv/, data/, logs/, .env, *.png
@@ -50,9 +57,10 @@ turk-price-intelligence/
 │   │   ├── html_scrapers.py            ← Fallback HTML Scrapers (MagentoHTML, SarHascraper)
 │   │   └── playwright_scrapers.py      ← סקראפרים ייעודיים ל-JS heavy (PlaywrightEngine, GenericPlaywright)
 │   ├── storage/
-│   │   └── sqlite_store.py             ← לוגיקת SQLite (init_db, save_store_result, get_db, mark_store_*)
+│   │   └── sqlite_store.py             ← לוגיקת SQLite (init_db, save_store_result, deal_scores, scraper_health)
 │   └── utils/
-│       └── filters.py                  ← פילטרים אלגוריתמיים, ניקוי שמות, נרמול, סינון, STOP_WORDS
+│       ├── filters.py                  ← פילטרים אלגוריתמיים, ניקוי שמות, נרמול, STOP_WORDS, volume filters
+│       └── llm_volume.py               ← DeepSeek V4 Flash fallback לחילוץ נפח
 ├── tests/                              ← בדיקות ידניות (לא pytest — סקריפטים עצמאיים)
 └── data/                               ← תיקיית תוצאות ודוחות (נוצרת אוטומטית, לא ב-git)
     ├── price_intel.db                  ← בסיס הנתונים הראשי של SQLite
@@ -80,8 +88,8 @@ sudo apt install -y chromium-browser
 
 ```bash
 # שכפול הריפו וכניסה לתיקייה
-git clone https://github.com/andrewvlk88/turk-price-intelligence.git
-cd turk-price-intelligence
+git clone https://github.com/andrewvlk88/AV-hermes-turki.git
+cd AV-hermes-turki
 
 # יצירת סביבה וירטואלית והפעלתה
 python3 -m venv venv
@@ -93,8 +101,10 @@ pip install -r requirements.txt
 # התקנת מנוע Playwright ב-Venv
 playwright install chromium
 
-# ווידוא ש-SQLite זמין (מובנה בפייתון, לא דורש התקנה)
-python3 -c "import sqlite3; print(f'SQLite {sqlite3.sqlite_version} ✅')"
+# הגדרת משתני סביבה נדרשים ב-~/.hermes/.env:
+#   TAVILY_API_KEY=tvly-...
+#   OLLAMA_API_KEY=...
+#   GEMINI_API_KEY=... (לא בשימוש כרגע)
 ```
 
 > **הערה:** SQLite3 הוא חלק מ-stdlib של פייתון מגרסה 2.5+. אין צורך ב-`pip install` או התקנה נפרדת. קובץ ה-DB (`data/price_intel.db`) נוצר אוטומטית בריצה הראשונה.
@@ -106,8 +116,6 @@ python3 -c "import sqlite3; print(f'SQLite {sqlite3.sqlite_version} ✅')"
 ⚠️ **חובה להפעיל תמיד מתוך ה-venv של הפרויקט!**
 
 ### 1. כלי ניהול סוויטת מעקב המחירים (`manage_tracker.py`)
-
-מנהל את רשימת המוצרים הקבועה שאתה רוצה לנטר לאיתור מבצעים.
 
 ```bash
 # הצגת רשימת המשקאות הנוכחית במעקב
@@ -126,8 +134,6 @@ python manage_tracker.py run
 
 ### 2. הרצת חיפוש חופשי ידני (`run.py`)
 
-סריקת השוואת מחירים למוצר ספציפי מחוץ לרשימת המעקב:
-
 ```bash
 # הרצה רגילה (מדפיסה טבלה קריאה עם אמוג'ים)
 python run.py "וודקה בלוגה ליטר"
@@ -136,7 +142,15 @@ python run.py "וודקה בלוגה ליטר"
 python run.py "בלוגה" --agent-mode
 ```
 
-### 3. קרון Watchdog יומי (`cron_tracker.py`)
+### 3. דשבורד חי (`dashboard.py`)
+
+```bash
+streamlit run dashboard.py --server.port 5053
+```
+
+מופיע דרך Cloudflare Tunnel ב-`https://turki.avolkov.click`.
+
+### 4. קרון Watchdog יומי (`cron_tracker.py`)
 
 רץ אוטומטית כל שעתיים דרך Hermes Cron. **עקרון Watchdog**: שקט מוחלט כשאין דילים, פריצה לטלגרם רק כשנמצא מבצע.
 
@@ -169,9 +183,13 @@ python run.py "בלוגה" --agent-mode
 ## 🗄️ SQLite Database
 
 - **מיקום**: `data/price_intel.db` (נוצר אוטומטית, לא ב-git)
-- **טבלאות**: `price_results` (מוצרים שנמצאו), `store_status` (סטטוס ריצה לכל חנות)
+- **טבלאות**:
+  - `price_results` — מוצרים שנמצאו בסריקה האחרונה
+  - `price_history` — היסטוריית מחירים מכל ריצה
+  - `deal_scores` — דילים שזוהו (חנות, מחיר, חיסכון %)
+  - `scraper_health` — סטטוס ריצה לכל חנות
 - **מחיר אפקטיבי**: `COALESCE(sale_price, regular_price)` — אין עמודת `price` יחידה
-- **מפתח ריצה**: כל ריצה מקבל `run_id` ייחודי. שליפת תוצאות: `SELECT MAX(run_id) FROM price_results WHERE query = ?`
+- **מפתח ריצה**: כל ריצה מקבלת `run_id` ייחודי. shared_run_id מאחד סבב סריקה שלמה.
 
 ---
 
@@ -187,6 +205,8 @@ python run.py "בלוגה" --agent-mode
 8. **תמיד להציג תוצאות מול baseline של הטורקי**: רשימת מוצרים בלי השוואה לטורקי = חסרת ערך. דיל = זול מהטורקי ב-5%+.
 9. **אורך ריצה**: סריקה מלאה של 6 מוצרים × 20 חנויות = ~14-15 דקות. תכנן בהתאם ל-timeout של קרונים.
 10. **מניעת שגיאות הרשאות Git**: דחיפת שינויים ל-GitHub עשויה להיכשל עם שגיאת 403 במקרה של Token פג תוקף. במקרה כזה יש לבצע רענון הרשאות באמצעות ה-GitHub CLI.
+11. **סינון 200ml/500ml (v2.5+)**: בקבוקונים קטנים מסוננים ברמת ה-build_report. הם לא מופיעים בדוח ובדשבורד ולא משווים מול הטורקי — מונע דילים מזויפים מסוג "₪25 ל-200ml מול ₪65 לליטר".
+12. **Hermes config — extract backend**: כדי שחיפושים ברשת יחזירו תוכן מלא במהירות, יש להגדיר `web.extract_backend: tavily` ב-`~/.hermes/config.yaml` ולשמור את `TAVILY_API_KEY` ב-`~/.hermes/.env`.
 
 ---
 
