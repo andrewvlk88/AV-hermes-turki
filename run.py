@@ -13,7 +13,7 @@ from src.models import PriceReport, ProductPrice
 from src.scrapers.api_scrapers import HaturkiAPIScraper
 from src.scrapers.unified_scraper import UnifiedScraper
 from src.export.csv_export import bulk_export
-from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, extract_volume_ml
+from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, extract_volume_ml, is_relevant_volume
 from src.scrapers.playwright_scrapers import PlaywrightEngine
 
 from src.models import Store
@@ -220,6 +220,9 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
                 continue
             # Filter irrelevant products (noise like wines when searching whiskey)
             if not is_relevant_product(p.product_name, query, min_words=2):
+                continue
+            # Filter 200ml and 500ml bottles — not relevant for Turki comparison
+            if not is_relevant_volume(p.volume_ml):
                 continue
             clean_products.append(p)
         if clean_products:
