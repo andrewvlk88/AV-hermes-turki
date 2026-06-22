@@ -35,6 +35,9 @@ ACCESORY_KEYWORDS = {
     # Non-alcohol items that pollute search results
     "מארז מתנה", "קרטון", "מהודר", "סירופ", "סאקה", "מיקס", "מונין",
     "סאוור", "ביטר", "מסחרר", "תחליף", "נטול", "אלכוהול",
+    # Bundle / event / promotion noise
+    "אירוח בסטייל", "פותחים שולחן", "ערב יין וגבינות", "פיקניק מושקע",
+    "מיניאטורה", "מיניאטורות", "מארז אירוח", "מארז יין", "סט יין",
 }
 
 # Minimum price threshold for full-size alcohol bottles

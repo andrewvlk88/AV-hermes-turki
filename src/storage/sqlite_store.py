@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from src.utils.filters import is_relevant_volume_by_name
+
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "price_intel.db"
 
@@ -165,6 +167,11 @@ def save_store_result(run_id: str, query: str, store_name: str,
                 continue
             
             product_name = p.get('product_name', '')[:200]
+            
+            # Final guard: never store 200ml/500ml products
+            if not is_relevant_volume_by_name(product_name):
+                continue
+            
             regular_price = p.get('regular_price')
             sale_price = p.get('sale_price')
             volume_ml = p.get('volume_ml')

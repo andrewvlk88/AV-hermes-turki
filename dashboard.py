@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import pandas as pd
 
 from src.storage.sqlite_store import get_db, init_db, DB_PATH
+from src.utils.filters import is_relevant_volume, extract_volume_ml
 
 # ── Hermes Teal (Large) Cyberpunk Palette ──
 HERMES_BG = "#070D14"          # Deep cosmic black-blue
@@ -268,6 +269,13 @@ def load_data():
     conn = get_db()
 
     price_df = pd.read_sql_query("SELECT * FROM price_results ORDER BY timestamp DESC", conn)
+    
+    # Final guard: drop 200ml/500ml products from dashboard display
+    price_df = price_df[price_df.apply(
+        lambda row: is_relevant_volume(row['volume_ml']) if pd.notna(row['volume_ml']) else is_relevant_volume(extract_volume_ml(row['product_name'])),
+        axis=1
+    )]
+    
     status_df = pd.read_sql_query("SELECT * FROM store_status ORDER BY timestamp DESC", conn)
     tracked_df = pd.read_sql_query("SELECT * FROM tracked_queries ORDER BY id", conn)
 

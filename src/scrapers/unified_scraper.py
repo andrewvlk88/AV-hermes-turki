@@ -26,7 +26,7 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 from src.models import ProductPrice, Store
-from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, STOP_WORDS
+from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, STOP_WORDS, is_relevant_volume_by_name
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -563,6 +563,9 @@ class UnifiedScraper:
                     if best_price and not is_bogus_price(best_price, p.product_name):
                         cleaned_results.append(p)
                 products = cleaned_results
+
+                # Filter out 200ml/500ml products before saving to DB
+                products = [p for p in products if is_relevant_volume_by_name(p.product_name)]
 
                 if run_id:
                     save_store_result(run_id, query, name, products)
