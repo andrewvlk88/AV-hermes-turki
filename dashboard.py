@@ -343,21 +343,23 @@ def main():
     with st.sidebar:
         st.markdown("## ⚙️ קומנד סנטר")
 
-        # Run Selector (Saves historical runs)
-        run_ids = price_df["run_id"].unique()[:20]
-        selected_run = st.selectbox("סבב סריקה", run_ids, format_func=lambda x: x[:19])
+        # Latest run only — no selector, just display it
+        latest_run = price_df["run_id"].iloc[0]
+        st.markdown(
+            f'<p style="color:{HERMES_TEAL};font-size:0.9rem;text-align:right;font-weight:600;">'
+            f'סבב סריקה: {latest_run[:19]}</p>',
+            unsafe_allow_html=True,
+        )
+        selected_run = latest_run
 
-        # Product Selector — STRICT: NO "All" option to avoid cross-product pollution
-        queries = sorted(price_df["query"].unique())
-        run_queries = price_df[price_df["run_id"] == selected_run]["query"].unique()
-        
-        default_idx = 0
-        if len(run_queries) > 0:
-            for i, q in enumerate(queries):
-                if q in run_queries:
-                    default_idx = i
-                    break
-        selected_query = st.selectbox("מוצר נבחר", queries, index=default_idx)
+        # Product Selector — only products from the latest run
+        run_queries = sorted(
+            price_df[price_df["run_id"] == selected_run]["query"].unique()
+        )
+        if not run_queries:
+            st.warning("אין מוצרים בסבב האחרון")
+            return
+        selected_query = st.selectbox("מוצר נבחר", run_queries)
 
         st.markdown("---")
         st.markdown(
