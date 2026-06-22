@@ -143,6 +143,7 @@ def save_store_result(run_id: str, query: str, store_name: str,
                        products: List[Any]) -> int:
     """Save a store's results to SQLite. Returns number of products saved.
     
+    Writes to both price_results (current run) and price_history (permanent log).
     Accepts ProductPrice objects or dicts.
     """
     conn = get_db()
@@ -163,24 +164,36 @@ def save_store_result(run_id: str, query: str, store_name: str,
             if not best_price:
                 continue
             
+            product_name = p.get('product_name', '')[:200]
+            regular_price = p.get('regular_price')
+            sale_price = p.get('sale_price')
+            volume_ml = p.get('volume_ml')
+            is_on_sale = int(p.get('is_on_sale', False))
+            
+            # Write to price_results (current run data)
             conn.execute("""
                 INSERT INTO price_results 
                 (query, store_name, product_name, regular_price, sale_price, 
                  volume_ml, is_on_sale, product_url, store_url, sku, run_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                query,
-                store_name,
-                p.get('product_name', '')[:200],
-                p.get('regular_price'),
-                p.get('sale_price'),
-                p.get('volume_ml'),
-                int(p.get('is_on_sale', False)),
-                p.get('product_url', ''),
-                p.get('store_url', ''),
-                p.get('sku', ''),
-                run_id,
+                query, store_name, product_name, regular_price, sale_price,
+                volume_ml, is_on_sale,
+                p.get('product_url', ''), p.get('store_url', ''),
+                p.get('sku', ''), run_id,
             ))
+            
+            # Write to price_history (permanent historical log)
+            conn.execute("""
+                INSERT INTO price_history
+                (product_name, store_name, query, regular_price, sale_price,
+                 volume_ml, is_on_sale, run_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                product_name, store_name, query, regular_price, sale_price,
+                volume_ml, is_on_sale, run_id,
+            ))
+            
             saved += 1
         
         # Update store status
@@ -195,6 +208,78 @@ def save_store_result(run_id: str, query: str, store_name: str,
     except Exception as e:
         conn.rollback()
         raise e
+    finally:
+        conn.close()
+
+
+def save_deal_scores(run_id: str, query: str, deals: List[Dict]) -> int:
+    """Save deal scores to SQLite. Returns number of deals saved.
+    
+    Called from build_report() after deal detection.
+    Each deal dict should have: type, product, store, price, etc.
+    """
+    conn = get_db()
+    try:
+        saved = 0
+        for d in deals:
+            dtype = d.get("type", "turki")
+            product = d.get("product", d.get("product_name", ""))
+            store = d.get("store", d.get("store_name", ""))
+            price = d.get("price", 0)
+            turki_price = d.get("turki_price")
+            savings = d.get("savings", d.get("savings_amount"))
+            pct = d.get("savings_percent", d.get("discount_percent", 0))
+            
+            # Score: weight savings_percent heavily, add bonus for turki deals
+            if dtype == "turki":
+                score = (pct or 0) * 1.5
+            elif dtype == "sale":
+                score = (pct or 0) * 1.0
+            else:
+                score = 0.5  # anomaly
+            
+            conn.execute("""
+                INSERT INTO deal_scores
+                (product_name, store_name, query, price, turki_price,
+                 savings_amount, savings_percent, score, deal_type, run_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                product[:200], store, query, price, turki_price,
+                savings, pct, round(score, 2), dtype, run_id,
+            ))
+            saved += 1
+        
+        conn.commit()
+        return saved
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+
+def save_scraper_health(run_id: str, query: str, stores_checked: int,
+                        stores_responded: int, deal_count: int = 0,
+                        anomaly_count: int = 0) -> bool:
+    """Save scraper health metrics for a single query run.
+    
+    Called at the end of each query scan.
+    """
+    conn = get_db()
+    try:
+        rate = round(stores_responded / max(stores_checked, 1), 2)
+        conn.execute("""
+            INSERT INTO scraper_health
+            (run_id, query, stores_checked, stores_responded,
+             response_rate, deal_count, anomaly_count, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """, (run_id, query, stores_checked, stores_responded,
+              rate, deal_count, anomaly_count))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        return False
     finally:
         conn.close()
 

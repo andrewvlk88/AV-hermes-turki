@@ -365,6 +365,43 @@ async def async_main(queries: List[str], output_dir: str = "data"):
             report = build_report(all_prices, query)
             last_report = report
             
+            # Save deal scores to DB
+            if report.deals_found:
+                try:
+                    from src.storage.sqlite_store import save_deal_scores
+                    # Convert string deals to structured dicts for DB
+                    structured_deals = []
+                    for d_str in report.deals_found:
+                        if d_str.startswith("💰"):
+                            structured_deals.append({
+                                "type": "turki", "product": d_str,
+                                "store": "", "price": 0,
+                                "savings_percent": 0,
+                            })
+                        elif d_str.startswith("🔥"):
+                            structured_deals.append({
+                                "type": "sale", "product": d_str,
+                                "store": "", "price": 0,
+                                "discount_percent": 0,
+                            })
+                    if structured_deals:
+                        save_deal_scores(shared_run_id, query, structured_deals)
+                except Exception:
+                    pass
+            
+            # Save scraper health
+            try:
+                from src.storage.sqlite_store import save_scraper_health
+                save_scraper_health(
+                    shared_run_id, query,
+                    stores_checked=report.stores_checked,
+                    stores_responded=report.stores_responded,
+                    deal_count=len(report.deals_found),
+                    anomaly_count=len(report.anomalies),
+                )
+            except Exception:
+                pass
+            
             # Save
             base = Path(output_dir)
             base.mkdir(parents=True, exist_ok=True)
