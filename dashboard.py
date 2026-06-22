@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
-"""Turkí Price Intelligence — Streamlit Dashboard.
+"""Turkí Price Intelligence — Streamlit Dashboard (RTL).
 
 Hermes Teal design system. Run with:
     cd ~/turk-price-intelligence
-    ./venv/bin/streamlit run dashboard.py --server.port 8501 --server.headless true
+    ./venv/bin/streamlit run dashboard.py
 """
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
-import sqlite3
 
 from src.storage.sqlite_store import get_db, init_db, DB_PATH
 
 # ── Hermes Teal Design System ──
 HERMES_TEAL = "#00B5AD"
 HERMES_TEAL_DARK = "#00807B"
-HERMES_TEAL_LIGHT = "#E0F7F5"
+HERMES_TEAL_DARK_22 = "rgba(0,128,123,0.13)"
+HERMES_TEAL_DARK_33 = "rgba(0,128,123,0.2)"
 HERMES_BG = "#0F1419"
 HERMES_CARD = "#1A2330"
 HERMES_TEXT = "#E0E0E0"
@@ -32,7 +31,6 @@ HERMES_GREEN = "#00D977"
 HERMES_RED = "#FF4757"
 HERMES_AMBER = "#FFA502"
 
-# Page config
 st.set_page_config(
     page_title="🦃 טורקי פרייס אינטליג׳נס",
     page_icon="🦃",
@@ -40,38 +38,42 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Inject CSS
+# ── CSS: RTL + Hermes Teal ──
 st.markdown(f"""
 <style>
-    /* ── Global ── */
+    /* ── RTL Global ── */
     .stApp {{
         background-color: {HERMES_BG};
         color: {HERMES_TEXT};
+        direction: rtl;
     }}
     .stApp > header {{ background-color: transparent; }}
     .stApp > section[data-testid="stMain"] > div {{
         padding-top: 1rem;
     }}
 
-    /* ── Sidebar ── */
+    /* ── Sidebar (right side in RTL) ── */
     section[data-testid="stSidebar"] {{
         background-color: {HERMES_CARD};
-        border-right: 1px solid {HERMES_TEAL_DARK}33;
+        border-left: 1px solid {HERMES_TEAL_DARK_33};
+        direction: rtl;
     }}
     section[data-testid="stSidebar"] .stSelectbox label,
     section[data-testid="stSidebar"] .stMultiSelect label,
     section[data-testid="stSidebar"] .stSlider label {{
         color: {HERMES_TEAL} !important;
         font-weight: 600;
+        text-align: right;
     }}
 
     /* ── Metrics ── */
     [data-testid="stMetric"] {{
         background-color: {HERMES_CARD};
-        border: 1px solid {HERMES_TEAL_DARK}22;
+        border: 1px solid {HERMES_TEAL_DARK_22};
         border-radius: 12px;
         padding: 16px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        direction: rtl;
     }}
     [data-testid="stMetricValue"] {{
         color: {HERMES_TEAL} !important;
@@ -80,11 +82,13 @@ st.markdown(f"""
     [data-testid="stMetricLabel"] {{
         color: {HERMES_MUTED} !important;
         font-size: 0.85rem;
+        text-align: right;
     }}
 
     /* ── Headers ── */
     h1, h2, h3 {{
         color: {HERMES_TEAL} !important;
+        text-align: right;
     }}
     h1 {{ font-weight: 800; letter-spacing: -0.5px; }}
     h2 {{ font-weight: 700; }}
@@ -92,14 +96,17 @@ st.markdown(f"""
     /* ── Tables ── */
     .stDataFrame table {{
         background-color: {HERMES_CARD} !important;
+        direction: rtl;
     }}
     .stDataFrame thead th {{
         color: {HERMES_TEAL} !important;
         background-color: {HERMES_CARD} !important;
+        text-align: right !important;
     }}
     .stDataFrame tbody td {{
         color: {HERMES_TEXT} !important;
         background-color: {HERMES_CARD} !important;
+        text-align: right !important;
     }}
 
     /* ── Tabs ── */
@@ -108,6 +115,7 @@ st.markdown(f"""
         background-color: {HERMES_CARD};
         border-radius: 10px;
         padding: 6px;
+        direction: rtl;
     }}
     .stTabs [data-baseweb="tab"] {{
         color: {HERMES_MUTED};
@@ -121,56 +129,60 @@ st.markdown(f"""
     }}
 
     /* ── Text ── */
-    .stMarkdown p {{ color: {HERMES_TEXT}; }}
+    .stMarkdown p {{ color: {HERMES_TEXT}; text-align: right; }}
     .stCode block {{
         background-color: {HERMES_CARD} !important;
-        border: 1px solid {HERMES_TEAL_DARK}33;
+        border: 1px solid {HERMES_TEAL_DARK_33};
     }}
 
     /* ── Alerts ── */
     .stAlert {{
         background-color: {HERMES_CARD} !important;
-        border: 1px solid {HERMES_TEAL_DARK}33;
+        border: 1px solid {HERMES_TEAL_DARK_33};
     }}
 
     /* ── Plotly ── */
     .stPlotlyChart {{
         background-color: {HERMES_CARD};
-        border: 1px solid {HERMES_TEAL_DARK}22;
+        border: 1px solid {HERMES_TEAL_DARK_22};
         border-radius: 12px;
         padding: 8px;
     }}
 
     /* ── Dividers ── */
     hr {{
-        border-color: {HERMES_TEAL_DARK}33;
+        border-color: {HERMES_TEAL_DARK_33};
     }}
 
-    /* ── Custom cards ── */
+    /* ── Deal cards (RTL: border on right) ── */
     .deal-card {{
         background-color: {HERMES_CARD};
-        border-left: 3px solid {HERMES_TEAL};
+        border-right: 3px solid {HERMES_TEAL};
         border-radius: 8px;
         padding: 12px 16px;
         margin-bottom: 8px;
+        direction: rtl;
     }}
-    .deal-card.turki {{ border-left-color: {HERMES_GREEN}; }}
-    .deal-card.sale {{ border-left-color: {HERMES_AMBER}; }}
-    .deal-card.anomaly {{ border-left-color: {HERMES_RED}; }}
+    .deal-card.turki {{ border-right-color: {HERMES_GREEN}; }}
+    .deal-card.sale {{ border-right-color: {HERMES_AMBER}; }}
+    .deal-card.anomaly {{ border-right-color: {HERMES_RED}; }}
     .deal-card .deal-type {{
         font-size: 0.8rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.5px;
+        text-align: right;
     }}
     .deal-card .deal-product {{
         font-size: 1.1rem;
         font-weight: 700;
         color: {HERMES_TEXT};
+        text-align: right;
     }}
     .deal-card .deal-meta {{
         font-size: 0.9rem;
         color: {HERMES_MUTED};
+        text-align: right;
     }}
 
     /* ── Status badge ── */
@@ -181,10 +193,35 @@ st.markdown(f"""
         font-size: 0.75rem;
         font-weight: 700;
     }}
-    .status-success {{ background: {HERMES_GREEN}22; color: {HERMES_GREEN}; }}
-    .status-error {{ background: {HERMES_RED}22; color: {HERMES_RED}; }}
-    .status-running {{ background: {HERMES_AMBER}22; color: {HERMES_AMBER}; }}
-    .status-pending {{ background: {HERMES_MUTED}22; color: {HERMES_MUTED}; }}
+    .status-success {{ background: rgba(0,217,119,0.13); color: {HERMES_GREEN}; }}
+    .status-error {{ background: rgba(255,71,87,0.13); color: {HERMES_RED}; }}
+    .status-running {{ background: rgba(255,165,2,0.13); color: {HERMES_AMBER}; }}
+    .status-pending {{ background: rgba(136,153,170,0.13); color: {HERMES_MUTED}; }}
+
+    /* ── Store list (RTL) ── */
+    .store-row {{
+        padding: 4px 0;
+        direction: rtl;
+        text-align: right;
+    }}
+    .store-row .store-name {{
+        color: {HERMES_TEXT};
+        margin-right: 12px;
+    }}
+    .store-row .store-count {{
+        color: {HERMES_MUTED};
+    }}
+    .store-row .store-error {{
+        color: {HERMES_RED};
+        font-size: 0.8rem;
+        padding-right: 20px;
+    }}
+
+    /* ── Info/Warning boxes ── */
+    .stInfo, .stWarning {{
+        direction: rtl;
+        text-align: right;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -192,60 +229,39 @@ st.markdown(f"""
 # ── DB helpers ──
 @st.cache_data(ttl=30)
 def load_data():
-    """Load all relevant data from SQLite."""
     init_db()
     conn = get_db()
 
-    # Price results (latest run per query)
-    price_df = pd.read_sql_query("""
-        SELECT * FROM price_results
-        ORDER BY timestamp DESC
-    """, conn)
-
-    # Store status
-    status_df = pd.read_sql_query("""
-        SELECT * FROM store_status
-        ORDER BY timestamp DESC
-    """, conn)
-
-    # Tracked queries
-    tracked_df = pd.read_sql_query("""
-        SELECT * FROM tracked_queries ORDER BY id
-    """, conn)
-
-    # Scraper health (if table has data)
+    price_df = pd.read_sql_query(
+        "SELECT * FROM price_results ORDER BY timestamp DESC", conn
+    )
+    status_df = pd.read_sql_query(
+        "SELECT * FROM store_status ORDER BY timestamp DESC", conn
+    )
+    tracked_df = pd.read_sql_query(
+        "SELECT * FROM tracked_queries ORDER BY id", conn
+    )
     try:
-        health_df = pd.read_sql_query("""
-            SELECT * FROM scraper_health ORDER BY timestamp DESC
-        """, conn)
+        health_df = pd.read_sql_query(
+            "SELECT * FROM scraper_health ORDER BY timestamp DESC", conn
+        )
     except Exception:
         health_df = pd.DataFrame()
-
-    # Deal scores (if table has data)
     try:
-        deals_df = pd.read_sql_query("""
-            SELECT * FROM deal_scores ORDER BY score DESC LIMIT 100
-        """, conn)
+        deals_df = pd.read_sql_query(
+            "SELECT * FROM deal_scores ORDER BY score DESC LIMIT 100", conn
+        )
     except Exception:
         deals_df = pd.DataFrame()
-
-    # Price history (if table has data)
     try:
-        history_df = pd.read_sql_query("""
-            SELECT * FROM price_history ORDER BY recorded_at DESC
-        """, conn)
+        history_df = pd.read_sql_query(
+            "SELECT * FROM price_history ORDER BY recorded_at DESC", conn
+        )
     except Exception:
         history_df = pd.DataFrame()
 
     conn.close()
     return price_df, status_df, tracked_df, health_df, deals_df, history_df
-
-
-def get_latest_run_id(price_df: pd.DataFrame) -> str:
-    """Get the most recent run_id."""
-    if price_df.empty:
-        return ""
-    return price_df.iloc[0]["run_id"]
 
 
 def plotly_layout(fig, title=""):
@@ -255,8 +271,10 @@ def plotly_layout(fig, title=""):
         plot_bgcolor=HERMES_CARD,
         paper_bgcolor=HERMES_CARD,
         font=dict(color=HERMES_TEXT, family="Arial"),
-        xaxis=dict(gridcolor=HERMES_TEAL_DARK + "22", color=HERMES_MUTED),
-        yaxis=dict(gridcolor=HERMES_TEAL_DARK + "22", color=HERMES_MUTED),
+        xaxis=dict(gridcolor=HERMES_TEAL_DARK_22, color=HERMES_MUTED,
+                   automargin=True),
+        yaxis=dict(gridcolor=HERMES_TEAL_DARK_22, color=HERMES_MUTED,
+                   automargin=True),
         legend=dict(bgcolor=HERMES_CARD, font=dict(color=HERMES_TEXT)),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -266,52 +284,76 @@ def plotly_layout(fig, title=""):
 # ── Main ──
 def main():
     st.title("🦃 טורקי פרייס אינטליג׳נס")
-    st.markdown(f'<p style="color:{HERMES_MUTED};font-size:0.9rem;">דשבורד מודיעין מחירים · עדכון אוטומטי כל 30 שניות</p>', unsafe_allow_html=True)
+    st.markdown(
+        f'<p style="color:{HERMES_MUTED};font-size:0.9rem;text-align:right;">'
+        f'דשבורד מודיעין מחירים · עדכון אוטומטי כל 30 שניות</p>',
+        unsafe_allow_html=True,
+    )
 
     price_df, status_df, tracked_df, health_df, deals_df, history_df = load_data()
-
-    # ── Sidebar ──
-    with st.sidebar:
-        st.markdown(f"## ⚙️ בקרה")
-
-        # Run selector
-        if not price_df.empty:
-            run_ids = price_df["run_id"].unique()[:20]
-            selected_run = st.selectbox("ריצה", run_ids, format_func=lambda x: x[:19])
-        else:
-            selected_run = ""
-            st.info("אין נתונים עדיין")
-
-        # Query selector
-        if not price_df.empty:
-            queries = price_df["query"].unique()
-            selected_query = st.selectbox("מוצר", ["הכל"] + list(queries))
-        else:
-            selected_query = "הכל"
-
-        st.markdown("---")
-        st.markdown(f'<p style="color:{HERMES_MUTED};font-size:0.8rem;">DB: {DB_PATH.name}</p>', unsafe_allow_html=True)
-        st.markdown(f'<p style="color:{HERMES_MUTED};font-size:0.8rem;">עודכן: {datetime.now().strftime("%H:%M:%S")}</p>', unsafe_allow_html=True)
 
     if price_df.empty:
         st.warning("לא נמצאו נתונים במסד. הרץ `python run.py \"בלוגה\"` או הפעל את הקרון.")
         return
 
-    # ── Filter data ──
-    run_prices = price_df[price_df["run_id"] == selected_run]
-    if selected_query != "הכל":
-        run_prices = run_prices[run_prices["query"] == selected_query]
-        run_status = status_df[(status_df["run_id"] == selected_run) & (status_df["query"] == selected_query)]
-    else:
-        run_status = status_df[status_df["run_id"] == selected_run]
+    # ── Sidebar ──
+    with st.sidebar:
+        st.markdown("## ⚙️ בקרה")
+
+        # Run selector
+        run_ids = price_df["run_id"].unique()[:20]
+        selected_run = st.selectbox("ריצה", run_ids, format_func=lambda x: x[:19])
+
+        # Product selector — NO "הכל", must pick a product
+        queries = sorted(price_df["query"].unique())
+        if not queries:
+            st.warning("אין מוצרים בנתונים")
+            return
+        # Default to most common query in this run
+        run_queries = price_df[price_df["run_id"] == selected_run]["query"].unique()
+        default_idx = 0
+        if len(run_queries) > 0:
+            # Find the first run query in the sorted list
+            for i, q in enumerate(queries):
+                if q in run_queries:
+                    default_idx = i
+                    break
+        selected_query = st.selectbox("מוצר", queries, index=default_idx)
+
+        st.markdown("---")
+        st.markdown(
+            f'<p style="color:{HERMES_MUTED};font-size:0.8rem;text-align:right;">'
+            f'DB: {DB_PATH.name}</p>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<p style="color:{HERMES_MUTED};font-size:0.8rem;text-align:right;">'
+            f'עודכן: {datetime.now().strftime("%H:%M:%S")}</p>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Filter data for selected run + query ──
+    run_prices = price_df[
+        (price_df["run_id"] == selected_run) &
+        (price_df["query"] == selected_query)
+    ]
+    run_status = status_df[
+        (status_df["run_id"] == selected_run) &
+        (status_df["query"] == selected_query)
+    ]
 
     # ── KPI Row ──
     col1, col2, col3, col4 = st.columns(4)
 
-    stores_responded = run_status[run_status["status"] == "success"]["store_name"].nunique() if not run_status.empty else 0
-    stores_total = run_status["store_name"].nunique() if not run_status.empty else 0
+    stores_responded = (
+        run_status[run_status["status"] == "success"]["store_name"].nunique()
+        if not run_status.empty else 0
+    )
+    stores_total = (
+        run_status["store_name"].nunique() if not run_status.empty else 0
+    )
     total_products = len(run_prices)
-    on_sale = run_prices["is_on_sale"].sum() if "is_on_sale" in run_prices.columns else 0
+    on_sale = int(run_prices["is_on_sale"].sum()) if "is_on_sale" in run_prices.columns else 0
 
     with col1:
         st.metric("חנויות הגיבו", f"{stores_responded}/{stores_total}")
@@ -339,13 +381,19 @@ def main():
 
     # ── Tab 1: Overview ──
     with tab1:
-        st.markdown("### מחירים לפי חנות")
+        st.markdown(f"### מחירים לפי חנות — {selected_query}")
 
         if not run_prices.empty:
+            # Effective price
+            run_prices = run_prices.copy()
+            run_prices["effective_price"] = run_prices["sale_price"].fillna(
+                run_prices["regular_price"]
+            )
+
             # Bar chart: avg price per store
             store_avg = run_prices.groupby("store_name").agg(
-                avg_price=("regular_price", "mean"),
-                count=("product_name", "count")
+                avg_price=("effective_price", "mean"),
+                count=("product_name", "count"),
             ).reset_index().sort_values("avg_price")
 
             fig = px.bar(
@@ -355,30 +403,45 @@ def main():
                 color="avg_price",
                 color_continuous_scale=[HERMES_TEAL, HERMES_TEAL_DARK],
                 text="avg_price",
-                labels={"store_name": "חנות", "avg_price": "מחיר ממוצע (₪)"},
+                labels={
+                    "store_name": "חנות",
+                    "avg_price": "מחיר ממוצע (₪)",
+                },
             )
-            fig.update_traces(texttemplate="₪%{text:.0f}", textposition="outside")
+            fig.update_traces(
+                texttemplate="₪%{text:.0f}", textposition="outside",
+                textfont=dict(color=HERMES_TEXT),
+            )
             plotly_layout(fig, "מחיר ממוצע לפי חנות")
             st.plotly_chart(fig, use_container_width=True)
 
-            # Recent products table
-            st.markdown("### מוצרים אחרונים")
-            display_cols = ["store_name", "product_name", "regular_price", "sale_price", "is_on_sale"]
+            # Products table
+            st.markdown("### מוצרים שנמצאו")
+            display_cols = [
+                "store_name", "product_name", "regular_price",
+                "sale_price", "is_on_sale",
+            ]
             avail_cols = [c for c in display_cols if c in run_prices.columns]
             st.dataframe(
                 run_prices[avail_cols].head(50),
                 use_container_width=True,
                 hide_index=True,
+                column_config={
+                    "store_name": "חנות",
+                    "product_name": "מוצר",
+                    "regular_price": st.column_config.NumberColumn("מחיר רגיל", format="₪%.0f"),
+                    "sale_price": st.column_config.NumberColumn("מחיר מבצע", format="₪%.0f"),
+                    "is_on_sale": "במבצע",
+                },
             )
         else:
-            st.info("אין נתונים לריצה זו")
+            st.info(f"אין נתונים למוצר {selected_query} בריצה זו")
 
     # ── Tab 2: Stores ──
     with tab2:
         st.markdown("### סטטוס חנויות")
 
         if not run_status.empty:
-            # Status breakdown
             status_counts = run_status["status"].value_counts().reset_index()
             status_counts.columns = ["status", "count"]
 
@@ -394,7 +457,10 @@ def main():
                 fig_pie = go.Figure(data=[go.Pie(
                     labels=status_counts["status"],
                     values=status_counts["count"],
-                    marker=dict(colors=[status_colors.get(s, HERMES_TEAL) for s in status_counts["status"]]),
+                    marker=dict(colors=[
+                        status_colors.get(s, HERMES_TEAL)
+                        for s in status_counts["status"]
+                    ]),
                     hole=0.6,
                 )])
                 fig_pie.update_traces(textfont=dict(color=HERMES_TEXT))
@@ -402,37 +468,34 @@ def main():
                 st.plotly_chart(fig_pie, use_container_width=True)
 
             with col_b:
-                # Store detail table
-                status_display = run_status.copy()
-                status_display["status"] = status_display["status"].apply(
-                    lambda s: f'<span class="status-badge status-{s}">{s}</span>'
-                )
-
                 st.markdown("**פירוט לפי חנות:**")
                 for _, row in run_status.iterrows():
-                    badge = f'<span class="status-badge status-{row["status"]}">{row["status"].upper()}</span>'
+                    badge = (
+                        f'<span class="status-badge status-{row["status"]}">'
+                        f'{row["status"].upper()}</span>'
+                    )
                     count = row.get("product_count", 0)
                     st.markdown(
-                        f'<div style="padding:4px 0;">{badge} '
-                        f'<span style="color:{HERMES_TEXT};margin-right:12px;">{row["store_name"]}</span> '
-                        f'<span style="color:{HERMES_MUTED};">— {count} מוצרים</span>'
+                        f'<div class="store-row">{badge} '
+                        f'<span class="store-name">{row["store_name"]}</span> '
+                        f'<span class="store-count">— {count} מוצרים</span>'
                         f'</div>',
-                        unsafe_allow_html=True
+                        unsafe_allow_html=True,
                     )
                     if row["status"] == "error" and row.get("error_msg"):
                         st.markdown(
-                            f'<div style="color:{HERMES_RED};font-size:0.8rem;padding-right:20px;">⚠️ {row["error_msg"][:100]}</div>',
-                            unsafe_allow_html=True
+                            f'<div class="store-row"><span class="store-error">'
+                            f'⚠️ {row["error_msg"][:100]}</span></div>',
+                            unsafe_allow_html=True,
                         )
         else:
             st.info("אין נתוני סטטוס לריצה זו")
 
     # ── Tab 3: Deals ──
     with tab3:
-        st.markdown("### דילים ומבצעים")
+        st.markdown(f"### דילים ומבצעים — {selected_query}")
 
         if not deals_df.empty:
-            # Deal cards
             for _, deal in deals_df.head(20).iterrows():
                 dtype = deal.get("deal_type", "turki")
                 icon = {"turki": "💰", "sale": "🔥", "anomaly": "⚠️"}.get(dtype, "📊")
@@ -455,55 +518,66 @@ def main():
                     f'<div class="deal-product">{product}</div>'
                     f'<div class="deal-meta">{" · ".join(meta_parts)}</div>'
                     f'</div>',
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
 
-            # Score distribution
             st.markdown("### דירוג דילים")
             fig_deals = px.bar(
                 deals_df.head(30),
                 x="product_name",
                 y="score",
                 color="deal_type",
-                color_discrete_map={"turki": HERMES_GREEN, "sale": HERMES_AMBER, "anomaly": HERMES_RED},
+                color_discrete_map={
+                    "turki": HERMES_GREEN,
+                    "sale": HERMES_AMBER,
+                    "anomaly": HERMES_RED,
+                },
                 labels={"product_name": "מוצר", "score": "ציון"},
             )
             plotly_layout(fig_deals, "דירוג דילים לפי ציון")
             st.plotly_chart(fig_deals, use_container_width=True)
         else:
-            # Fallback: find deals from price_results
-            st.info("טבלת deal_scores ריקה — מציג מבצעים מ-price_results")
-
+            # Fallback: find sales from price_results for this query
             if not run_prices.empty:
                 sales = run_prices[run_prices["is_on_sale"] == 1].copy()
                 if not sales.empty:
-                    sales["discount"] = sales["regular_price"] - sales["sale_price"].fillna(sales["regular_price"])
-                    sales = sales[sales["discount"] > 0].sort_values("discount", ascending=False).head(20)
+                    sales["discount"] = sales["regular_price"] - sales[
+                        "sale_price"
+                    ].fillna(sales["regular_price"])
+                    sales = sales[sales["discount"] > 0].sort_values(
+                        "discount", ascending=False
+                    ).head(20)
 
                     for _, row in sales.iterrows():
-                        pct = (row["discount"] / row["regular_price"]) * 100 if row["regular_price"] else 0
+                        pct = (
+                            (row["discount"] / row["regular_price"]) * 100
+                            if row["regular_price"] else 0
+                        )
                         st.markdown(
                             f'<div class="deal-card sale">'
-                            f'<div class="deal-type">🔥 SALE</div>'
+                            f'<div class="deal-type">🔥 מבצע</div>'
                             f'<div class="deal-product">{row["product_name"]}</div>'
-                            f'<div class="deal-meta">{row["store_name"]} · ₪{row["sale_price"]:.0f} '
-                            f'(במקום ₪{row["regular_price"]:.0f}, -{pct:.0f}%)</div>'
+                            f'<div class="deal-meta">{row["store_name"]} · '
+                            f'₪{row["sale_price"]:.0f} '
+                            f'(במקום ₪{row["regular_price"]:.0f}, '
+                            f'-{pct:.0f}%)</div>'
                             f'</div>',
-                            unsafe_allow_html=True
+                            unsafe_allow_html=True,
                         )
                 else:
-                    st.markdown(f'<p style="color:{HERMES_MUTED};">אין מבצעים בריצה זו</p>', unsafe_allow_html=True)
+                    st.info(f"אין מבצעים למוצר {selected_query} בריצה זו")
+            else:
+                st.info(f"אין נתונים למוצר {selected_query} בריצה זו")
 
     # ── Tab 4: Price History ──
     with tab4:
         st.markdown("### היסטוריית מחירים")
 
         if not history_df.empty:
-            # Price trend chart
             product_filter = st.selectbox(
                 "מוצר למעקב",
                 ["הכל"] + sorted(history_df["product_name"].unique().tolist()),
-                key="history_product"
+                key="history_product",
             )
 
             if product_filter != "הכל":
@@ -512,6 +586,7 @@ def main():
                 hist_filtered = history_df
 
             if not hist_filtered.empty:
+                hist_filtered = hist_filtered.copy()
                 hist_filtered["effective_price"] = hist_filtered["sale_price"].fillna(
                     hist_filtered["regular_price"]
                 )
@@ -521,7 +596,11 @@ def main():
                     y="effective_price",
                     color="store_name",
                     line_shape="spline",
-                    labels={"recorded_at": "תאריך", "effective_price": "מחיר (₪)", "store_name": "חנות"},
+                    labels={
+                        "recorded_at": "תאריך",
+                        "effective_price": "מחיר (₪)",
+                        "store_name": "חנות",
+                    },
                 )
                 fig_hist.update_traces(line=dict(width=2))
                 plotly_layout(fig_hist, f"מגמת מחירים — {product_filter}")
@@ -529,25 +608,32 @@ def main():
         else:
             st.info("טבלת price_history ריקה — הנתונים יתחילו להצטבר בריצות הבאות")
 
-        # Also show historical trends from price_results (fallback)
-        st.markdown("### מגמת מחירים מ-price_results (כל הריצות)")
+        # Fallback: trends from price_results
+        st.markdown("### מגמת מחירים — כל הריצות")
         if not price_df.empty:
             trend_df = price_df.copy()
-            trend_df["effective_price"] = trend_df["sale_price"].fillna(trend_df["regular_price"])
+            trend_df["effective_price"] = trend_df["sale_price"].fillna(
+                trend_df["regular_price"]
+            )
             trend_df = trend_df.dropna(subset=["effective_price"])
 
-            # Pick top products
             top_products = trend_df["product_name"].value_counts().head(5).index.tolist()
             trend_df = trend_df[trend_df["product_name"].isin(top_products)]
 
             if not trend_df.empty:
-                trend_agg = trend_df.groupby(["timestamp", "product_name"])["effective_price"].mean().reset_index()
+                trend_agg = trend_df.groupby(["timestamp", "product_name"])[
+                    "effective_price"
+                ].mean().reset_index()
                 fig_trend = px.line(
                     trend_agg,
                     x="timestamp",
                     y="effective_price",
                     color="product_name",
-                    labels={"timestamp": "זמן ריצה", "effective_price": "מחיר ממוצע (₪)", "product_name": "מוצר"},
+                    labels={
+                        "timestamp": "זמן ריצה",
+                        "effective_price": "מחיר ממוצע (₪)",
+                        "product_name": "מוצר",
+                    },
                 )
                 fig_trend.update_traces(line=dict(width=2))
                 plotly_layout(fig_trend, "מגמת מחירים — 5 מוצרים מובילים")
@@ -584,26 +670,37 @@ def main():
                 plotly_layout(fig_deals, "דילים שנמצאו לאורך זמן")
                 st.plotly_chart(fig_deals, use_container_width=True)
 
-            # Health table
             st.markdown("### פירוט ריצות")
             st.dataframe(
-                health_df[["timestamp", "query", "stores_checked", "stores_responded",
-                          "response_rate", "deal_count", "anomaly_count"]].head(30),
+                health_df[[
+                    "timestamp", "query", "stores_checked", "stores_responded",
+                    "response_rate", "deal_count", "anomaly_count",
+                ]].head(30),
                 use_container_width=True,
                 hide_index=True,
+                column_config={
+                    "timestamp": "זמן",
+                    "query": "מוצר",
+                    "stores_checked": "חנויות נבדקו",
+                    "stores_responded": "חנויות הגיבו",
+                    "response_rate": "אחוז תגובה",
+                    "deal_count": "דילים",
+                    "anomaly_count": "אנומליות",
+                },
             )
         else:
-            # Fallback: compute health from store_status
+            # Fallback: compute from store_status
             st.info("טבלת scraper_health ריקה — מחשב מ-store_status")
 
             if not status_df.empty:
-                # Success rate per store across all runs
                 store_health = status_df.groupby("store_name").agg(
                     total_runs=("status", "count"),
                     successes=("status", lambda x: (x == "success").sum()),
                     errors=("status", lambda x: (x == "error").sum()),
                 ).reset_index()
-                store_health["success_rate"] = (store_health["successes"] / store_health["total_runs"] * 100).round(1)
+                store_health["success_rate"] = (
+                    store_health["successes"] / store_health["total_runs"] * 100
+                ).round(1)
                 store_health = store_health.sort_values("success_rate", ascending=True)
 
                 fig_health = px.bar(
@@ -615,19 +712,36 @@ def main():
                     text="success_rate",
                     labels={"store_name": "חנות", "success_rate": "אחוז הצלחה"},
                 )
-                fig_health.update_traces(texttemplate="%{text:.0f}%", textposition="outside")
+                fig_health.update_traces(
+                    texttemplate="%{text:.0f}%", textposition="outside",
+                    textfont=dict(color=HERMES_TEXT),
+                )
                 plotly_layout(fig_health, "אחוז הצלחה לפי חנות (כל הריצות)")
                 st.plotly_chart(fig_health, use_container_width=True)
 
-                st.dataframe(store_health, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    store_health,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "store_name": "חנות",
+                        "total_runs": "סה״כ ריצות",
+                        "successes": "הצלחות",
+                        "errors": "שגיאות",
+                        "success_rate": st.column_config.NumberColumn(
+                            "אחוז הצלחה", format="%.1f%%"
+                        ),
+                    },
+                )
 
     # ── Footer ──
     st.markdown("---")
     st.markdown(
         f'<p style="color:{HERMES_MUTED};font-size:0.75rem;text-align:center;">'
-        f'🪽 Hermes · Turkí Price Intelligence v2.4 · {datetime.now().strftime("%Y-%m-%d %H:%M")}'
+        f'🪽 Hermes · Turkí Price Intelligence v2.4 · '
+        f'{datetime.now().strftime("%Y-%m-%d %H:%M")}'
         f'</p>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 
