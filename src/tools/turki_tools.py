@@ -80,22 +80,40 @@ import sqlite3  # noqa: E402 — needed for type hint above
 #  Tool 1: run_full_scan
 # ════════════════════════════════════════════════════════════════════
 
-async def run_full_scan(queries: List[str]) -> Dict[str, Any]:
-    """Run a full price scan across all stores for the given queries.
+async def run_full_scan() -> Dict[str, Any]:
+    """Run a full price scan across all stores using tracked queries.
 
-    Reuses ``run.async_main`` which internally calls ``search_all``
+    Reads the tracked product list from ``tracked_queries`` (same table
+    that ``manage_tracker.py`` manages), then delegates to
+    ``run.async_main`` which internally calls ``search_all``
     (Haturki API → 19 other stores) and ``build_report``.
 
-    Args:
-        queries: Product search terms, e.g. ["וודקה בלוגה ליטר"].
+    No parameters required — the tool is self-contained.
 
     Returns:
-        ``{"ok": True, "run_id": str, "summary": str, "deals": [...],
-           "stores_checked": int, "stores_responded": int}`` on success,
-        or ``{"ok": False, "error": str}`` on failure.
+        ``{"ok": True, "run_id": str, "queries": [...], "summary": str,
+           "deals": [...], "stores_checked": int, "stores_responded": int}``
+        on success, or ``{"ok": False, "error": str}`` on failure.
     """
+    # Ensure tracked_queries table exists
+    try:
+        from manage_tracker import init_tracker_db
+        init_tracker_db()
+    except ImportError as exc:
+        return _err(f"cannot import manage_tracker: {exc}")
+
+    # Read tracked queries from DB
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT query FROM tracked_queries ORDER BY id"
+        ).fetchall()
+        queries = [r["query"] for r in rows]
+    finally:
+        conn.close()
+
     if not queries:
-        return _err("queries list must not be empty")
+        return _err("no tracked products found in tracked_queries table")
 
     try:
         from run import async_main  # lazy import — run.py is at project root
@@ -135,36 +153,15 @@ async def run_full_scan(queries: List[str]) -> Dict[str, Any]:
 async def run_tracked_products_scan() -> Dict[str, Any]:
     """Run a scan on all products in the ``tracked_queries`` table.
 
-    Reads the tracked list from SQLite (same table that
-    ``manage_tracker.py`` manages), then delegates to
-    :func:`run_full_scan`.
+    This is now a thin alias for :func:`run_full_scan` — both read from
+    the same ``tracked_queries`` table. Kept as a separate tool for
+    semantic clarity (an orchestrator may want to explicitly signal
+    "scan tracked products" vs a generic full scan in the future).
 
     Returns:
-        Same shape as :func:`run_full_scan`, with an extra
-        ``"tracked_queries"`` list.
+        Same shape as :func:`run_full_scan`.
     """
-    try:
-        from manage_tracker import init_tracker_db  # ensures table exists
-        init_tracker_db()
-    except ImportError as exc:
-        return _err(f"cannot import manage_tracker: {exc}")
-
-    conn = get_db()
-    try:
-        rows = conn.execute(
-            "SELECT query FROM tracked_queries ORDER BY id"
-        ).fetchall()
-        queries = [r["query"] for r in rows]
-    finally:
-        conn.close()
-
-    if not queries:
-        return _err("no tracked products found in tracked_queries table")
-
-    result = await run_full_scan(queries)
-    if result["ok"]:
-        result["tracked_queries"] = queries
-    return result
+    return await run_full_scan()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -449,12 +446,12 @@ async def _example() -> None:
     _print_json("Tool 5: analyze_deal('בלוגה')", analysis)
 
     # 4. run_full_scan (async — triggers live scraping)
-    #    Uncomment to run a live scan (~2 min per query):
-    # scan = await run_full_scan(["בלוגה"])
+    #    Uncomment to run a live scan (~15 min for tracked products):
+    # scan = await run_full_scan()
     # _print_json("Tool 1: run_full_scan", scan)
 
-    # 5. run_tracked_products_scan (async — scans all tracked products)
-    #    Uncomment to run a live scan (~15 min for 6 products):
+    # 5. run_tracked_products_scan (async — thin alias of run_full_scan)
+    #    Uncomment to run a live scan:
     # tracked = await run_tracked_products_scan()
     # _print_json("Tool 2: run_tracked_products_scan", tracked)
 
