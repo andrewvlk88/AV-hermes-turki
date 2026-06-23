@@ -211,6 +211,90 @@ streamlit run dashboard.py --server.port 5053
 
 ---
 
+## 🧠 Orchestrator Agent
+
+ה-`OrchestratorAgent` (`src/agents/orchestrator.py`) הוא ה"מוח" של המערכת — מקבל הוראות בשפה טבעית (עברית/אנגלית), מתכנן אילו כלים להפעיל ובאיזה סדר, ומחזיר תוצאה מובנית עם הסבר החלטות.
+
+### איך זה עובד
+
+```
+execute(goal, constraints)
+    │
+    ├─ 1. Plan — LLM מנתח את ה-goal + constraints → Plan (JSON)
+    │      ├─ intent: scan / analyze / deals / health / auto
+    │      ├─ check_health: האם לבדוק בריאות סקרייפרים
+    │      ├─ run_scan: האם לסרוק
+    │      ├─ fetch_deals: האם לשלוף דילים
+    │      └─ analyze_products: מוצרים ספציפיים לניתוח
+    │
+    ├─ 2. Act — קורא לכלים מ-src/tools/turki_tools.py
+    │      ├─ get_scraper_health_report()  ← health gate
+    │      ├─ run_full_scan() / run_tracked_products_scan()
+    │      ├─ get_recent_deals(min_score)
+    │      └─ analyze_deal(product_name)
+    │
+    └─ 3. Report — פלט מובנה: plan, steps, result, summary
+```
+
+**LLM Planning**: ה-planning משתמש ב-DeepSeek V4 Flash דרך Ollama Cloud עם few-shot examples. אם ה-LLM לא זמין או נכשל — fallback אוטומטי ל-keyword matching.
+
+**Plan Cache**: תוכניות זהות (אותו goal + constraints) נשמרות ב-cache בזיכרון ל-30 דקות. מונע קריאות LLM מיותרות.
+
+**Health Gate**: לפני סריקה, ה-Orchestrator בודק את response rate. אם הוא מתחת ל-`health_threshold` — הסריקה מבוטלת עם הסבר.
+
+### שימוש
+
+```python
+from src.agents.orchestrator import OrchestratorAgent, Constraints
+
+orch = OrchestratorAgent()
+
+# סריקה חכמה עם health gate
+result = await orch.execute(
+    "check health first, if healthy scan tracked products and return strong deals",
+    constraints={"min_score": 80, "health_threshold": 0.5}
+)
+
+# ניתוח מוצר ספציפי (בלי סריקה)
+result = await orch.execute(
+    "נתח את בלוגה ותראה דילים אחרונים",
+    constraints={"min_score": 50}
+)
+
+# רק דילים מה-DB (בלי סריקה)
+result = await orch.execute("show me recent deals", constraints={"min_score": 70})
+
+# רק בדיקת בריאות
+result = await orch.execute("check scraper health")
+```
+
+### דוגמאות smart goals
+
+| Goal | מה ה-Orchestrator יעשה |
+|---|---|
+| `"check health first, if healthy scan"` | health check → gate → scan אם בריא |
+| `"נתח את בלוגה ותראה דילים"` | analyze_deal("בלוגה") + get_recent_deals (ללא סריקה) |
+| `"show me recent deals above 70"` | get_recent_deals(min_score=70) בלבד |
+| `"do a smart scan"` | auto: health → scan → deals |
+| `"check scraper health"` | get_scraper_health_report בלבד |
+
+### Constraints זמינים
+
+| פרמטר | ברירת מחדל | תיאור |
+|---|---|---|
+| `min_score` | 70.0 | מינימום score לדילים |
+| `health_threshold` | 0.4 | מינימום response rate להרשות סריקה |
+| `health_days` | 7 | חלון זמן לבדיקת בריאות (ימים) |
+| `tracked_only` | True | סריקת מוצרים מ tracked_queries בלבד |
+| `focus_products` | [] | מוצרים ספציפיים לניתוח (עוקף סריקה) |
+| `max_deals` | 20 | מספר מקסימלי של דילים להחזרה |
+
+### Backward Compatibility
+
+המתודות הישנות `run_query()`, `run_tracked()`, `run_batch()` נשמרו ועובדות כמו לפני. `cron_tracker.py` לא מושפע.
+
+---
+
 ## 📜 License
 
 Personal project — Andrew Volkov (@andrewvlk88)

@@ -66,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -183,7 +184,11 @@ class OrchestratorAgent:
     _LLM_BASE_URL = "https://ollama.com/v1"
     _LLM_MODEL = "deepseek-v4-flash"
     _LLM_TIMEOUT = 30
-    _LLM_MAX_TOKENS = 1024
+    _LLM_MAX_TOKENS = 2048
+
+    # ── Plan cache (in-memory, TTL-based) ──────────────────────────
+    _PLAN_CACHE: Dict[str, tuple] = {}  # {cache_key: (Plan, expiry_timestamp)}
+    _PLAN_CACHE_TTL = 1800  # 30 minutes in seconds
 
     def __init__(self, timeout_per_query: int = 30 * 60):
         self.timeout = timeout_per_query
@@ -339,6 +344,10 @@ class OrchestratorAgent:
         plan. If the LLM is unavailable or returns invalid output,
         falls back to keyword-based planning.
 
+        A lightweight in-memory cache avoids redundant LLM calls when
+        the same goal + constraints combination is seen within the TTL
+        window (default 30 minutes).
+
         Args:
             goal: Natural-language instruction (Hebrew or English).
             c: Structured constraints from the caller.
@@ -346,10 +355,24 @@ class OrchestratorAgent:
         Returns:
             A Plan dataclass with decisions and rationale.
         """
-        # Try LLM planning first
+        # Check plan cache first
+        cache_key = self._plan_cache_key(goal, c)
+        cached = self._PLAN_CACHE.get(cache_key)
+        if cached is not None:
+            plan, expiry = cached
+            if time.time() < expiry:
+                logger.info("Orchestrator: plan from cache (key=%s)", cache_key[:16])
+                plan.rationale.insert(0, "Plan from cache (within TTL)")
+                return plan
+            else:
+                del self._PLAN_CACHE[cache_key]
+
+        # Try LLM planning
         plan = self._llm_plan(goal, c)
         if plan is not None:
             logger.info("Orchestrator: plan via LLM — intent=%s", plan.intent)
+            # Store in cache
+            self._PLAN_CACHE[cache_key] = (plan, time.time() + self._PLAN_CACHE_TTL)
             return plan
 
         # Fallback: keyword-based planning
@@ -357,6 +380,22 @@ class OrchestratorAgent:
         plan = self._keyword_plan(goal, c)
         plan.rationale.insert(0, "Fallback: LLM unavailable, using keyword matching")
         return plan
+
+    @staticmethod
+    def _plan_cache_key(goal: str, c: Constraints) -> str:
+        """Build a cache key from goal + constraint fields that affect planning."""
+        import hashlib
+        key_parts = [
+            goal.strip().lower(),
+            f"ms={c.min_score}",
+            f"ht={c.health_threshold}",
+            f"hd={c.health_days}",
+            f"to={c.tracked_only}",
+            f"fp={','.join(c.focus_products)}",
+            f"md={c.max_deals}",
+        ]
+        raw = "|".join(key_parts)
+        return hashlib.md5(raw.encode()).hexdigest()
 
     def _llm_plan(self, goal: str, c: Constraints) -> Optional[Plan]:
         """Use LLM to analyze the goal and produce a structured Plan.
@@ -419,7 +458,36 @@ class OrchestratorAgent:
             "- If the goal only asks for deals (no scan), set run_scan=false, fetch_deals=true.\n"
             "- If the goal is empty or vague, default to: check_health=true, run_scan=true, fetch_deals=true.\n"
             "- scan_tool should be 'run_tracked_products_scan' if tracked_only=true, else 'run_full_scan'.\n"
-            "- Provide a short rationale (1-3 items) explaining your decisions.\n\n"
+            "- Provide a short rationale (1-3 items) explaining your decisions.\n"
+            "- analyze_products must contain the EXACT product names as written in the goal (Hebrew or English).\n\n"
+            "## Examples\n\n"
+            "### Example 1: Conditional scan with health gate\n"
+            'Goal: "check health first, if scrapers are healthy then scan tracked products and return only strong deals above 80"\n'
+            'Constraints: min_score=80, health_threshold=0.5, tracked_only=true\n'
+            'Output:\n'
+            '{"intent": "scan", "check_health": true, "run_scan": true, '
+            '"scan_tool": "run_tracked_products_scan", "fetch_deals": true, '
+            '"analyze_products": [], "rationale": ['
+            '"Goal requires health check before scanning.", '
+            '"Tracked-only scan requested via tracked_only=true.", '
+            '"Deals with min_score=80 requested after scan."]}\n\n'
+            "### Example 2: Analyze specific product (no scan)\n"
+            'Goal: "נתח את היסטוריית המחירים של בלוגה ותראה לי דילים אחרונים"\n'
+            'Constraints: min_score=50, tracked_only=true\n'
+            'Output:\n'
+            '{"intent": "analyze", "check_health": false, "run_scan": false, '
+            '"scan_tool": "run_tracked_products_scan", "fetch_deals": true, '
+            '"analyze_products": ["בלוגה"], "rationale": ['
+            '"User asks to analyze a specific product (בלוגה) — no scan needed.", '
+            '"User also asks for recent deals, so fetch_deals=true with min_score=50."]}\n\n'
+            "### Example 3: Vague goal — default to auto\n"
+            'Goal: "do a smart scan"\n'
+            'Constraints: min_score=70, tracked_only=true\n'
+            'Output:\n'
+            '{"intent": "auto", "check_health": true, "run_scan": true, '
+            '"scan_tool": "run_tracked_products_scan", "fetch_deals": true, '
+            '"analyze_products": [], "rationale": ['
+            '"Vague goal — defaulting to full auto flow: health check, scan, then deals."]}\n\n'
             "Return ONLY valid JSON (no markdown, no explanation):\n"
             '{\n'
             '  "intent": "scan|analyze|deals|health|auto",\n'
