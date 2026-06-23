@@ -172,6 +172,50 @@ def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
     return None
 
 
+def filter_products_with_turki_match(all_prices: dict, query: str) -> dict:
+    """Drop products from other stores if they have no matching Turki baseline.
+
+    A match means same normalized product name and same/similar volume.
+    Products that don't appear at הטורקי can't be compared, so we drop them
+    from the report and DB.
+    """
+    turki_products = all_prices.get("הטורקי", [])
+    if not turki_products:
+        # No Turki baseline at all — keep everything for inspection
+        return all_prices
+
+    # Build Turki lookup exactly like build_report does
+    turki_lookup = {}
+    for p in turki_products:
+        best = p.sale_price or p.regular_price
+        if not best:
+            continue
+        norm_name = normalize_for_matching(p.product_name)
+        vol_key = get_volume_key(p.product_name)
+        if vol_key is not None:
+            full_key = f"{norm_name}_{vol_key:.0f}"
+            if full_key not in turki_lookup:
+                turki_lookup[full_key] = {"price": best, "url": p.product_url, "name": p.product_name}
+        else:
+            if norm_name not in turki_lookup:
+                turki_lookup[norm_name] = {"price": best, "url": p.product_url, "name": p.product_name}
+
+    filtered = {"הטורקי": turki_products}
+    for store_name, products in all_prices.items():
+        if store_name == "הטורקי":
+            continue
+        keep = []
+        for p in products:
+            norm_name = normalize_for_matching(p.product_name)
+            vol = get_volume_key(p.product_name)
+            key = f"{norm_name}_{vol:.0f}" if vol is not None else norm_name
+            if find_turki_match(key, turki_lookup):
+                keep.append(p)
+        if keep:
+            filtered[store_name] = keep
+    return filtered
+
+
 async def search_all(query: str, run_id: str = None) -> dict:
     """Search ALL stores — Haturki API first, then rest sequentially."""
     from src.storage.sqlite_store import init_db, save_store_result, run_id_gen
@@ -200,6 +244,9 @@ async def search_all(query: str, run_id: str = None) -> dict:
     _print(f"\n🏪 שאר החנויות (אחת אחרי שנייה)...")
     other_prices = await UnifiedScraper.search_all(query, progress_callback, run_id=run_id)
     all_prices.update(other_prices)
+    
+    # 3. Drop products without a Turki baseline — no comparison possible
+    all_prices = filter_products_with_turki_match(all_prices, query)
     
     return all_prices
 
