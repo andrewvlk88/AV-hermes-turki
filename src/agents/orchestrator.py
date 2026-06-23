@@ -179,11 +179,11 @@ class OrchestratorAgent:
       work for existing callers.
     """
 
-    # ── Keywords for intent parsing ────────────────────────────────
-    _SCAN_KEYWORDS = {"scan", "סריקה", "סרוק", "סרוק", "run", "הרץ", "הפעל"}
-    _ANALYZE_KEYWORDS = {"analyze", "נתח", "ניתוח", "בדוק מוצר", "היסטוריה"}
-    _DEALS_KEYWORDS = {"deal", "deals", "דיל", "דילים", "מבצע", "מבצעים", "חיסכון"}
-    _HEALTH_KEYWORDS = {"health", "בריאות", "סטטוס", "status", "מצב"}
+    # ── LLM planning config ───────────────────────────────────────
+    _LLM_BASE_URL = "https://ollama.com/v1"
+    _LLM_MODEL = "deepseek-v4-flash"
+    _LLM_TIMEOUT = 30
+    _LLM_MAX_TOKENS = 1024
 
     def __init__(self, timeout_per_query: int = 30 * 60):
         self.timeout = timeout_per_query
@@ -325,37 +325,189 @@ class OrchestratorAgent:
     #  Planning logic
     # ═════════════════════════════════════════════════════════════
 
+    # ── Keywords for fallback intent parsing ─────────────────────
+    _SCAN_KEYWORDS = {"scan", "סריקה", "סרוק", "run", "הרץ", "הפעל"}
+    _ANALYZE_KEYWORDS = {"analyze", "נתח", "ניתוח", "בדוק מוצר", "היסטוריה"}
+    _DEALS_KEYWORDS = {"deal", "deals", "דיל", "דילים", "מבצע", "מבצעים", "חיסכון"}
+    _HEALTH_KEYWORDS = {"health", "בריאות", "סטטוס", "status", "מצב"}
+
     def _plan(self, goal: str, c: Constraints) -> Plan:
         """Decide what to do based on the goal string and constraints.
 
-        The planning is keyword-based (not LLM) — it looks for
-        scan/analyze/deals/health keywords in the goal and combines
-        them with the structured constraints to build a Plan.
+        Uses LLM reasoning (DeepSeek V4 Flash via Ollama Cloud) to
+        understand the natural-language goal and produce a structured
+        plan. If the LLM is unavailable or returns invalid output,
+        falls back to keyword-based planning.
 
-        If the goal is empty or unrecognizable, it defaults to "auto"
-        mode: check health → scan if healthy → fetch deals.
+        Args:
+            goal: Natural-language instruction (Hebrew or English).
+            c: Structured constraints from the caller.
+
+        Returns:
+            A Plan dataclass with decisions and rationale.
+        """
+        # Try LLM planning first
+        plan = self._llm_plan(goal, c)
+        if plan is not None:
+            logger.info("Orchestrator: plan via LLM — intent=%s", plan.intent)
+            return plan
+
+        # Fallback: keyword-based planning
+        logger.info("Orchestrator: LLM planning failed, falling back to keywords")
+        plan = self._keyword_plan(goal, c)
+        plan.rationale.insert(0, "Fallback: LLM unavailable, using keyword matching")
+        return plan
+
+    def _llm_plan(self, goal: str, c: Constraints) -> Optional[Plan]:
+        """Use LLM to analyze the goal and produce a structured Plan.
+
+        Sends a focused prompt to DeepSeek V4 Flash with the goal,
+        available tools, and current constraints. The LLM returns JSON
+        that maps directly to the Plan dataclass.
+
+        Returns:
+            Plan if LLM succeeded, None to signal fallback.
+        """
+        import os
+        import json as _json
+        import urllib.request
+
+        # Load API key (same pattern as llm_deals.py / llm_volume.py)
+        api_key = os.environ.get("OLLAMA_API_KEY", "")
+        if not api_key:
+            try:
+                with open(os.path.expanduser("~/.hermes/.env")) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("OLLAMA_API_KEY="):
+                            api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+            except Exception:
+                pass
+
+        if not api_key:
+            logger.debug("LLM planning skipped: no API key")
+            return None
+
+        # Build a compact system prompt describing available tools
+        tool_descriptions = [
+            "1. get_scraper_health_report(days) — sync, checks scraper response rates and store status from DB",
+            "2. run_full_scan() — async, ~15 min, scans all tracked products across 20 stores",
+            "3. run_tracked_products_scan() — async, thin alias of run_full_scan",
+            "4. get_recent_deals(min_score) — sync, returns deals from latest DB run above score threshold",
+            "5. analyze_deal(product_name) — sync, historical price analysis + whether current price is a meaningful deal",
+        ]
+
+        constraints_desc = (
+            f"min_score={c.min_score}, health_threshold={c.health_threshold}, "
+            f"health_days={c.health_days}, tracked_only={c.tracked_only}, "
+            f"max_deals={c.max_deals}, focus_products={c.focus_products}"
+        )
+
+        prompt = (
+            "You are a planning agent for a price intelligence system.\n"
+            "Given a user goal and constraints, decide which tools to call and in what order.\n\n"
+            f"Goal: \"{goal}\"\n"
+            f"Constraints: {constraints_desc}\n\n"
+            "Available tools:\n" + "\n".join(tool_descriptions) + "\n\n"
+            "Rules:\n"
+            "- If the goal mentions scanning, set run_scan=true.\n"
+            "- If scanning, always set check_health=true (health gate runs before scan).\n"
+            "- If the goal asks for deals or after a scan, set fetch_deals=true.\n"
+            "- If the goal mentions analyzing specific products, extract their names into analyze_products.\n"
+            "- If the goal only asks for health, set run_scan=false, fetch_deals=false.\n"
+            "- If the goal only asks for deals (no scan), set run_scan=false, fetch_deals=true.\n"
+            "- If the goal is empty or vague, default to: check_health=true, run_scan=true, fetch_deals=true.\n"
+            "- scan_tool should be 'run_tracked_products_scan' if tracked_only=true, else 'run_full_scan'.\n"
+            "- Provide a short rationale (1-3 items) explaining your decisions.\n\n"
+            "Return ONLY valid JSON (no markdown, no explanation):\n"
+            '{\n'
+            '  "intent": "scan|analyze|deals|health|auto",\n'
+            '  "check_health": true|false,\n'
+            '  "run_scan": true|false,\n'
+            '  "scan_tool": "run_tracked_products_scan|run_full_scan",\n'
+            '  "fetch_deals": true|false,\n'
+            '  "analyze_products": ["product name", ...],\n'
+            '  "rationale": ["reason 1", "reason 2"]\n'
+            '}'
+        )
+
+        url = self._LLM_BASE_URL + "/chat/completions"
+        payload = _json.dumps({
+            "model": self._LLM_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": self._LLM_MAX_TOKENS,
+        }).encode()
+
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self._LLM_TIMEOUT) as resp:
+                data = _json.loads(resp.read())
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                content = content.strip()
+
+                # Strip markdown code fences if present
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+                parsed = _json.loads(content)
+
+                # Validate and build Plan
+                plan = Plan(
+                    intent=str(parsed.get("intent", "auto")),
+                    check_health=bool(parsed.get("check_health", False)),
+                    run_scan=bool(parsed.get("run_scan", False)),
+                    scan_tool=str(parsed.get("scan_tool", "run_tracked_products_scan")),
+                    fetch_deals=bool(parsed.get("fetch_deals", False)),
+                    analyze_products=list(parsed.get("analyze_products", [])),
+                    rationale=[str(r) for r in parsed.get("rationale", [])],
+                )
+
+                # Post-validation: if scanning, force health check on
+                if plan.run_scan:
+                    plan.check_health = True
+                # Ensure scan_tool matches tracked_only constraint
+                if plan.run_scan:
+                    plan.scan_tool = (
+                        "run_tracked_products_scan" if c.tracked_only
+                        else "run_full_scan"
+                    )
+
+                logger.info("LLM plan rationale: %s", plan.rationale)
+                return plan
+
+        except Exception as exc:
+            logger.warning("LLM planning failed: %s", exc)
+            return None
+
+    def _keyword_plan(self, goal: str, c: Constraints) -> Plan:
+        """Keyword-based fallback planning (original logic).
+
+        Used when the LLM is unavailable or returns invalid output.
         """
         goal_lower = goal.lower().strip()
         rationale: List[str] = []
 
-        # Parse intent from goal keywords
         wants_scan = any(k in goal_lower for k in self._SCAN_KEYWORDS)
         wants_analyze = any(k in goal_lower for k in self._ANALYZE_KEYWORDS)
         wants_deals = any(k in goal_lower for k in self._DEALS_KEYWORDS)
         wants_health = any(k in goal_lower for k in self._HEALTH_KEYWORDS)
 
-        # Focus products: if constraints specify products, analyze them
         focus_products = c.focus_products.copy()
 
-        # If goal mentions specific products (quoted or after "analyze")
-        # Try to extract product names — simple heuristic: words after
-        # "analyze" or "נתח" up to "and" / "ולבדוק" / comma
         if wants_analyze and not focus_products:
             for marker in ("analyze", "נתח", "בדוק מוצר", "היסטוריה"):
                 if marker in goal_lower:
-                    # Take everything after the marker, split on common separators
                     after = goal_lower.split(marker, 1)[-1].strip()
-                    # Cut at "and" / "ולבדוק" / "ובדוק" / "and check" / comma
                     for sep in [" and ", " ולבדוק", " ובדוק", " and check", ",", " ו"]:
                         if sep in after:
                             after = after.split(sep, 1)[0].strip()
@@ -364,30 +516,27 @@ class OrchestratorAgent:
                         focus_products.append(after)
                     break
 
-        # Default: if no intent detected, go "auto"
         if not any([wants_scan, wants_analyze, wants_deals, wants_health]):
             rationale.append("No specific intent detected — defaulting to auto mode")
             wants_scan = True
             wants_deals = True
             wants_health = True
 
-        # Build plan
         plan = Plan(
             intent="scan" if wants_scan else ("analyze" if wants_analyze else
                    ("deals" if wants_deals else ("health" if wants_health else "auto"))),
-            check_health=wants_health or wants_scan,  # check health before scan
+            check_health=wants_health or wants_scan,
             run_scan=wants_scan,
             scan_tool="run_tracked_products_scan" if c.tracked_only else "run_full_scan",
-            fetch_deals=wants_deals or wants_scan,  # always fetch deals after scan
+            fetch_deals=wants_deals or wants_scan,
             analyze_products=focus_products,
             rationale=rationale,
         )
 
-        # If only analyzing specific products, no need to scan
         if focus_products and not wants_scan:
             plan.run_scan = False
             plan.check_health = False
-            plan.fetch_deals = wants_deals  # still may want deals alongside
+            plan.fetch_deals = wants_deals
 
         if plan.run_scan:
             plan.rationale.append(
