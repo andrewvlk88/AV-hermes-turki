@@ -109,6 +109,20 @@ def is_bogus_price(price: float, product_name: str) -> bool:
     """Check if a price is suspiciously low for a full-size alcohol product."""
     if is_accessory(product_name):
         return False
+    
+    # Hard floors by brand
+    HARD_FLOORS = {
+        "ג'וני ווקר": 80.0,
+        "בלוגה": 100.0,
+        "רוסקי סטנדרט": 50.0,
+        "דלתון": 35.0,
+        "ירדן": 50.0,
+        "גלנמורנג'י": 120.0
+    }
+    for brand, floor in HARD_FLOORS.items():
+        if brand in product_name:
+            if price < floor: return True
+
     if price < MIN_PRICE_SHEKELS and not is_mini_product(product_name):
         return True
     return False
