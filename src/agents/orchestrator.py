@@ -189,11 +189,22 @@ class OrchestratorAgent:
     # ── Plan cache (in-memory, TTL-based) ──────────────────────────
     _PLAN_CACHE: Dict[str, tuple] = {}  # {cache_key: (Plan, expiry_timestamp)}
     _PLAN_CACHE_TTL = 1800  # 30 minutes in seconds
+    _PLAN_CACHE_ENABLED = True  # can be disabled at runtime
 
     def __init__(self, timeout_per_query: int = 30 * 60):
         self.timeout = timeout_per_query
         self.analyzer = AnalyzerAgent()
         self.extractor = ExtractorAgent()
+        # ── Metrics (per-instance, in-memory counters) ─────────────
+        self._metrics: Dict[str, Any] = {
+            "llm_planning_calls": 0,    # total LLM calls attempted
+            "llm_planning_success": 0,  # LLM returned a valid plan
+            "llm_planning_failed": 0,   # LLM failed (network, parse, etc.)
+            "cache_hits": 0,            # plan served from cache
+            "cache_misses": 0,         # cache checked but not found/expired
+            "fallback_used": 0,        # keyword fallback activated
+            "planning_times": [],      # list of LLM call durations (seconds)
+        }
 
     # ═════════════════════════════════════════════════════════════
     #  Main entry point: execute()
@@ -323,6 +334,7 @@ class OrchestratorAgent:
             "steps": steps,
             "result": result,
             "summary": summary,
+            "metrics": self.get_metrics(),
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -346,7 +358,8 @@ class OrchestratorAgent:
 
         A lightweight in-memory cache avoids redundant LLM calls when
         the same goal + constraints combination is seen within the TTL
-        window (default 30 minutes).
+        window (default 30 minutes). The cache can be disabled via
+        ``self._PLAN_CACHE_ENABLED = False``.
 
         Args:
             goal: Natural-language instruction (Hebrew or English).
@@ -355,28 +368,42 @@ class OrchestratorAgent:
         Returns:
             A Plan dataclass with decisions and rationale.
         """
-        # Check plan cache first
+        # Check plan cache first (if enabled)
         cache_key = self._plan_cache_key(goal, c)
-        cached = self._PLAN_CACHE.get(cache_key)
-        if cached is not None:
-            plan, expiry = cached
-            if time.time() < expiry:
-                logger.info("Orchestrator: plan from cache (key=%s)", cache_key[:16])
-                plan.rationale.insert(0, "Plan from cache (within TTL)")
-                return plan
-            else:
-                del self._PLAN_CACHE[cache_key]
+        if self._PLAN_CACHE_ENABLED:
+            cached = self._PLAN_CACHE.get(cache_key)
+            if cached is not None:
+                plan, expiry = cached
+                if time.time() < expiry:
+                    self._metrics["cache_hits"] += 1
+                    logger.info("Orchestrator: plan from cache (key=%s)", cache_key[:16])
+                    plan.rationale.insert(0, "Plan from cache (within TTL)")
+                    return plan
+                else:
+                    del self._PLAN_CACHE[cache_key]
+            self._metrics["cache_misses"] += 1
+        else:
+            self._metrics["cache_misses"] += 1
 
         # Try LLM planning
+        self._metrics["llm_planning_calls"] += 1
+        t_start = time.time()
         plan = self._llm_plan(goal, c)
+        t_elapsed = time.time() - t_start
+        self._metrics["planning_times"].append(round(t_elapsed, 3))
+
         if plan is not None:
-            logger.info("Orchestrator: plan via LLM — intent=%s", plan.intent)
-            # Store in cache
-            self._PLAN_CACHE[cache_key] = (plan, time.time() + self._PLAN_CACHE_TTL)
+            self._metrics["llm_planning_success"] += 1
+            logger.info("Orchestrator: plan via LLM — intent=%s (%.2fs)", plan.intent, t_elapsed)
+            # Store in cache (only valid plans, only if cache enabled)
+            if self._PLAN_CACHE_ENABLED:
+                self._PLAN_CACHE[cache_key] = (plan, time.time() + self._PLAN_CACHE_TTL)
             return plan
 
         # Fallback: keyword-based planning
-        logger.info("Orchestrator: LLM planning failed, falling back to keywords")
+        self._metrics["llm_planning_failed"] += 1
+        self._metrics["fallback_used"] += 1
+        logger.info("Orchestrator: LLM planning failed (%.2fs), falling back to keywords", t_elapsed)
         plan = self._keyword_plan(goal, c)
         plan.rationale.insert(0, "Fallback: LLM unavailable, using keyword matching")
         return plan
@@ -396,6 +423,48 @@ class OrchestratorAgent:
         ]
         raw = "|".join(key_parts)
         return hashlib.md5(raw.encode()).hexdigest()
+
+    # ═════════════════════════════════════════════════════════════
+    #  Cache management & Metrics
+    # ═════════════════════════════════════════════════════════════
+
+    @classmethod
+    def clear_plan_cache(cls) -> int:
+        """Clear the entire plan cache. Returns number of entries removed.
+
+        Useful when the tracked product list changes or when you want
+        to force fresh LLM planning on the next call.
+        """
+        count = len(cls._PLAN_CACHE)
+        cls._PLAN_CACHE.clear()
+        logger.info("Plan cache cleared: %d entries removed", count)
+        return count
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return planning metrics for observability.
+
+        Returns a dict with counters and computed averages:
+        - llm_planning_calls: total LLM calls attempted
+        - llm_planning_success: successful LLM plans
+        - llm_planning_failed: failed LLM calls (network, parse, etc.)
+        - cache_hits: plans served from cache
+        - cache_misses: cache checked but not found / expired
+        - fallback_used: keyword fallback activations
+        - avg_planning_time: average LLM call duration (seconds)
+        - cache_size: current number of cached plans
+        """
+        times = self._metrics.get("planning_times", [])
+        avg_time = round(sum(times) / len(times), 3) if times else 0.0
+        return {
+            "llm_planning_calls": self._metrics["llm_planning_calls"],
+            "llm_planning_success": self._metrics["llm_planning_success"],
+            "llm_planning_failed": self._metrics["llm_planning_failed"],
+            "cache_hits": self._metrics["cache_hits"],
+            "cache_misses": self._metrics["cache_misses"],
+            "fallback_used": self._metrics["fallback_used"],
+            "avg_planning_time_s": avg_time,
+            "cache_size": len(self._PLAN_CACHE),
+        }
 
     def _llm_plan(self, goal: str, c: Constraints) -> Optional[Plan]:
         """Use LLM to analyze the goal and produce a structured Plan.
@@ -444,22 +513,23 @@ class OrchestratorAgent:
         )
 
         prompt = (
-            "You are a planning agent for a price intelligence system.\n"
+            "You are a planning agent for a price intelligence system that tracks alcohol prices across 20 Israeli stores.\n"
             "Given a user goal and constraints, decide which tools to call and in what order.\n\n"
             f"Goal: \"{goal}\"\n"
             f"Constraints: {constraints_desc}\n\n"
             "Available tools:\n" + "\n".join(tool_descriptions) + "\n\n"
-            "Rules:\n"
+            "## Decision Rules\n"
             "- If the goal mentions scanning, set run_scan=true.\n"
             "- If scanning, always set check_health=true (health gate runs before scan).\n"
-            "- If the goal asks for deals or after a scan, set fetch_deals=true.\n"
-            "- If the goal mentions analyzing specific products, extract their names into analyze_products.\n"
-            "- If the goal only asks for health, set run_scan=false, fetch_deals=false.\n"
-            "- If the goal only asks for deals (no scan), set run_scan=false, fetch_deals=true.\n"
+            "- If the goal asks for deals, or after a scan completes, set fetch_deals=true.\n"
+            "- If the goal mentions analyzing specific products, extract their EXACT names into analyze_products.\n"
+            "- If the goal only asks for health/status, set run_scan=false, fetch_deals=false.\n"
+            "- If the goal only asks for deals (no scan mentioned), set run_scan=false, fetch_deals=true.\n"
             "- If the goal is empty or vague, default to: check_health=true, run_scan=true, fetch_deals=true.\n"
-            "- scan_tool should be 'run_tracked_products_scan' if tracked_only=true, else 'run_full_scan'.\n"
-            "- Provide a short rationale (1-3 items) explaining your decisions.\n"
-            "- analyze_products must contain the EXACT product names as written in the goal (Hebrew or English).\n\n"
+            "- scan_tool must be 'run_tracked_products_scan' if tracked_only=true, else 'run_full_scan'.\n"
+            "- For conditional goals (\"if X then Y\"), reflect the condition in rationale but still set the plan fields.\n"
+            "- analyze_products must contain the EXACT product names as written in the goal (Hebrew or English), preserving quotes and spelling.\n"
+            "- Provide 1-3 rationale items. Each should be a short, actionable sentence.\n\n"
             "## Examples\n\n"
             "### Example 1: Conditional scan with health gate\n"
             'Goal: "check health first, if scrapers are healthy then scan tracked products and return only strong deals above 80"\n'
@@ -468,17 +538,17 @@ class OrchestratorAgent:
             '{"intent": "scan", "check_health": true, "run_scan": true, '
             '"scan_tool": "run_tracked_products_scan", "fetch_deals": true, '
             '"analyze_products": [], "rationale": ['
-            '"Goal requires health check before scanning.", '
+            '"Goal explicitly requires health check before scanning.", '
             '"Tracked-only scan requested via tracked_only=true.", '
             '"Deals with min_score=80 requested after scan."]}\n\n'
-            "### Example 2: Analyze specific product (no scan)\n"
+            "### Example 2: Analyze specific product in Hebrew (no scan)\n"
             'Goal: "נתח את היסטוריית המחירים של בלוגה ותראה לי דילים אחרונים"\n'
             'Constraints: min_score=50, tracked_only=true\n'
             'Output:\n'
             '{"intent": "analyze", "check_health": false, "run_scan": false, '
             '"scan_tool": "run_tracked_products_scan", "fetch_deals": true, '
             '"analyze_products": ["בלוגה"], "rationale": ['
-            '"User asks to analyze a specific product (בלוגה) — no scan needed.", '
+            '"User asks to analyze product בלוגה — no scan needed.", '
             '"User also asks for recent deals, so fetch_deals=true with min_score=50."]}\n\n'
             "### Example 3: Vague goal — default to auto\n"
             'Goal: "do a smart scan"\n'
@@ -488,6 +558,23 @@ class OrchestratorAgent:
             '"scan_tool": "run_tracked_products_scan", "fetch_deals": true, '
             '"analyze_products": [], "rationale": ['
             '"Vague goal — defaulting to full auto flow: health check, scan, then deals."]}\n\n'
+            "### Example 4: Multiple products in one goal\n"
+            'Goal: "analyze בלוגה and רוסקי סטנדרט, then show me deals above 60"\n'
+            'Constraints: min_score=60, tracked_only=true\n'
+            'Output:\n'
+            '{"intent": "analyze", "check_health": false, "run_scan": false, '
+            '"scan_tool": "run_tracked_products_scan", "fetch_deals": true, '
+            '"analyze_products": ["בלוגה", "רוסקי סטנדרט"], "rationale": ['
+            '"User asks to analyze two products: בלוגה and רוסקי סטנדרט.", '
+            '"User also asks for deals above 60, so fetch_deals=true with min_score=60."]}\n\n'
+            "### Example 5: Health-only check (no scan, no deals)\n"
+            'Goal: "בדוק את בריאות הסקרייפרים"\n'
+            'Constraints: min_score=70, tracked_only=true\n'
+            'Output:\n'
+            '{"intent": "health", "check_health": true, "run_scan": false, '
+            '"scan_tool": "run_tracked_products_scan", "fetch_deals": false, '
+            '"analyze_products": [], "rationale": ['
+            '"User only asks for scraper health check — no scan or deals needed."]}\n\n'
             "Return ONLY valid JSON (no markdown, no explanation):\n"
             '{\n'
             '  "intent": "scan|analyze|deals|health|auto",\n'
