@@ -1,76 +1,538 @@
-"""Orchestrator Agent — coordinates Searcher, Extractor, and Analyzer agents.
+"""Orchestrator Agent — intelligent coordinator for Turkí Price Intelligence.
 
-This is the main pipeline coordinator for Turkí Price Intelligence.
-It chains the three agent types together:
+This is the "brain" that decides how and when to use the available
+tools from src/tools/turki_tools.py. Instead of running fixed
+procedural flows, it accepts high-level goals and constraints, checks
+system health, and makes decisions about what to run.
 
-    SearcherAgent → finds products across stores
-         ↓
-    ExtractorAgent → parses HTML, extracts structured ProductPrice data
-         ↓
-    AnalyzerAgent → compares prices, finds deals, detects anomalies
+Design:
+    ┌─────────────────────────────────────────────────────┐
+    │                  OrchestratorAgent                   │
+    │                                                      │
+    │  execute(goal, constraints)  ← main entry point      │
+    │       │                                              │
+    │       ├─ 1. Plan: decide what to do                  │
+    │       │      ├─ check health threshold?               │
+    │       │      ├─ tracked-only or full scan?            │
+    │       │      └─ what min_score / filters?            │
+    │       │                                              │
+    │       ├─ 2. Act: call tools via ToolRegistry         │
+    │       │      ├─ get_scraper_health_report()           │
+    │       │      ├─ run_full_scan() / run_tracked_*()     │
+    │       │      ├─ get_recent_deals(min_score)           │
+    │       │      └─ analyze_deal(product_name)            │
+    │       │                                              │
+    │       └─ 3. Report: structured output                 │
+    │              ├─ decisions taken (why)                │
+    │              ├─ tool results                          │
+    │              └─ final summary                         │
+    └─────────────────────────────────────────────────────┘
 
-The Orchestrator manages the full lifecycle:
-  - Load tracked queries from DB (or accept ad-hoc queries)
-  - Run searches sequentially (CloakBrowser constraint)
-  - Persist results to SQLite at each step (partial survival)
-  - Log scraper health metrics
-  - Produce final PriceReport with deals + anomalies + summary
+The Orchestrator is NOT a ReAct agent — it doesn't loop on
+observations. It's a single-pass planner + executor that makes smart
+decisions up front, calls the right tools, and returns everything.
+
+Compatibility:
+    - run_query() / run_tracked() / run_batch() preserved for
+      backward compat with any existing callers.
+    - cron_tracker.py is unaffected — it imports from run.py directly.
 
 Usage:
     from src.agents.orchestrator import OrchestratorAgent
 
     orch = OrchestratorAgent()
-    report = await orch.run_query("וודקה בלוגה ליטר")
 
-    # Or batch mode for all tracked products:
-    reports = await orch.run_tracked()
+    # Simple: scan tracked products, return strong deals
+    result = await orch.execute("scan and report strong deals")
+
+    # Advanced: with constraints
+    result = await orch.execute(
+        "scan tracked products, but only if scrapers are healthy",
+        constraints={
+            "min_score": 80,
+            "health_threshold": 0.5,
+            "days": 7,
+        }
+    )
+
+    # Just analyze (no scan)
+    result = await orch.execute(
+        "analyze בלוגה and check recent deals",
+        constraints={"min_score": 50}
+    )
 """
+from __future__ import annotations
+
 import asyncio
 import logging
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# ── project root on sys.path ──────────────────────────────────────────
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.models import ProductPrice, PriceReport, Store, ComparisonResult
 from src.storage.sqlite_store import (
-    get_db, init_db, save_store_result, mark_store_error,
-    mark_store_running, run_id_gen,
+    get_db,
+    init_db,
+    save_store_result,
+    mark_store_error,
+    mark_store_running,
+    run_id_gen,
 )
 from src.agents.analyzer import AnalyzerAgent
 from src.agents.extractor import ExtractorAgent
 from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product
+from src.logger import get_logger
 
-logger = logging.getLogger("turk_pi.orchestrator")
+logger = get_logger(__name__)
 
-# Import search engine from run.py (avoids circular imports)
-# We import lazily inside methods because run.py imports from src.* too
 
+# ════════════════════════════════════════════════════════════════════
+#  Constraints dataclass
+# ════════════════════════════════════════════════════════════════════
+
+@dataclass
+class Constraints:
+    """User-provided constraints that shape the Orchestrator's decisions.
+
+    Attributes:
+        min_score: Minimum deal score to include in results (0–100). Default 70.
+        health_threshold: Minimum overall response rate (0–1) required to
+            proceed with a scan. If the recent health is below this,
+            the Orchestrator will warn and skip the scan. Default 0.4.
+        health_days: Look-back window (days) for health check. Default 7.
+        focus_products: Specific product names to analyze (no scan, just DB
+            lookup). If provided, the Orchestrator skips scanning.
+        tracked_only: If True, only scan tracked products. Default True.
+        max_deals: Maximum number of deals to return (top-N by score).
+            Default 20. Set to 0 for unlimited.
+        scan_timeout: Timeout in seconds for the entire scan. Default 1800 (30 min).
+    """
+    min_score: float = 70.0
+    health_threshold: float = 0.4
+    health_days: int = 7
+    focus_products: List[str] = field(default_factory=list)
+    tracked_only: bool = True
+    max_deals: int = 20
+    scan_timeout: int = 1800
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Plan (internal decision structure)
+# ════════════════════════════════════════════════════════════════════
+
+@dataclass
+class Plan:
+    """Internal plan representing what the Orchestrator decided to do."""
+    # High-level intent parsed from the goal string
+    intent: str  # "scan", "analyze", "deals", "health", "auto"
+    # Should we check scraper health first?
+    check_health: bool = True
+    # Should we run a scan?
+    run_scan: bool = False
+    # Which scan tool to call
+    scan_tool: str = ""  # "run_full_scan" / "run_tracked_products_scan"
+    # Should we fetch recent deals?
+    fetch_deals: bool = False
+    # Should we analyze specific products?
+    analyze_products: List[str] = field(default_factory=list)
+    # Human-readable decision rationale
+    rationale: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "intent": self.intent,
+            "check_health": self.check_health,
+            "run_scan": self.run_scan,
+            "scan_tool": self.scan_tool,
+            "fetch_deals": self.fetch_deals,
+            "analyze_products": self.analyze_products,
+            "rationale": self.rationale,
+        }
+
+
+# ════════════════════════════════════════════════════════════════════
+#  OrchestratorAgent
+# ════════════════════════════════════════════════════════════════════
 
 class OrchestratorAgent:
-    """Main pipeline coordinator — chains Search → Extract → Analyze.
+    """Intelligent coordinator that decides how to use the tool layer.
 
-    Replaces the procedural flow in run.py with a clean agent-based architecture
-    while keeping full backward compatibility (run.py still works as-is).
+    The Orchestrator receives a natural-language goal (or a structured
+    constraint set), plans what tools to call, executes them, and
+    returns a structured result with full transparency about its
+    decisions.
 
-    Pipeline per query:
-        1. Search: Haturki API → other 19 stores (sequential)
-        2. Extract: Clean + filter + normalize product names
-        3. Analyze: Deal detection, anomaly detection, comparison
-        4. Persist: SQLite (price_results, store_status, price_history, scraper_health)
-        5. Report: PriceReport with deals + anomalies + summary
+    Key design decisions:
+    - Single-pass planner (not ReAct). The plan is decided up front
+      based on the goal + constraints, then executed without looping.
+    - Tool calls are delegated to src/tools/turki_tools.py — the
+      Orchestrator never re-implements tool logic.
+    - All output follows the {"ok": bool, ...} convention.
+    - Backward-compatible: run_query / run_tracked / run_batch still
+      work for existing callers.
     """
+
+    # ── Keywords for intent parsing ────────────────────────────────
+    _SCAN_KEYWORDS = {"scan", "סריקה", "סרוק", "סרוק", "run", "הרץ", "הפעל"}
+    _ANALYZE_KEYWORDS = {"analyze", "נתח", "ניתוח", "בדוק מוצר", "היסטוריה"}
+    _DEALS_KEYWORDS = {"deal", "deals", "דיל", "דילים", "מבצע", "מבצעים", "חיסכון"}
+    _HEALTH_KEYWORDS = {"health", "בריאות", "סטטוס", "status", "מצב"}
 
     def __init__(self, timeout_per_query: int = 30 * 60):
         self.timeout = timeout_per_query
         self.analyzer = AnalyzerAgent()
         self.extractor = ExtractorAgent()
 
+    # ═════════════════════════════════════════════════════════════
+    #  Main entry point: execute()
+    # ═════════════════════════════════════════════════════════════
+
+    async def execute(
+        self,
+        goal: str = "",
+        constraints: Optional[Constraints | Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a high-level goal with optional constraints.
+
+        This is the main entry point for agent-style calls. The
+        Orchestrator parses the goal, builds a plan, executes it via
+        tools, and returns a structured result.
+
+        Args:
+            goal: Natural-language instruction. Examples:
+                - "scan and report strong deals"
+                - "check health, then scan if healthy"
+                - "analyze בלוגה and check recent deals"
+                - "just show me recent deals"
+            constraints: Either a Constraints dataclass or a dict with
+                any of: min_score, health_threshold, health_days,
+                focus_products, tracked_only, max_deals, scan_timeout.
+
+        Returns:
+            ``{"ok": True, "goal": str, "plan": {...}, "steps": [...],
+               "result": {...}, "summary": str}``
+        """
+        # Normalize constraints
+        c = self._normalize_constraints(constraints)
+
+        # Phase 1: Plan
+        plan = self._plan(goal, c)
+        logger.info("Orchestrator plan: %s", plan.to_dict())
+
+        # Phase 2: Execute plan
+        steps: List[Dict[str, Any]] = []
+        health_data: Optional[Dict[str, Any]] = None
+
+        # Step 2a: Health check (if planned)
+        if plan.check_health:
+            health_data = self._call_tool_sync(
+                "get_scraper_health_report", days=c.health_days
+            )
+            steps.append({
+                "step": "health_check",
+                "tool": "get_scraper_health_report",
+                "result": health_data,
+            })
+
+            # Gate: if health is below threshold, skip scan
+            if plan.run_scan and health_data.get("ok"):
+                rate = health_data.get("overall_response_rate", 1.0)
+                if rate < c.health_threshold:
+                    plan.run_scan = False
+                    plan.rationale.append(
+                        f"Skipped scan: response rate {rate:.0%} < "
+                        f"threshold {c.health_threshold:.0%}"
+                    )
+
+        # Step 2b: Scan (if planned and not skipped)
+        scan_data: Optional[Dict[str, Any]] = None
+        if plan.run_scan:
+            if plan.scan_tool == "run_tracked_products_scan":
+                scan_data = await self._call_tool_async("run_tracked_products_scan")
+            else:
+                scan_data = await self._call_tool_async("run_full_scan")
+            steps.append({
+                "step": "scan",
+                "tool": plan.scan_tool,
+                "result": self._summarize_scan_result(scan_data),
+            })
+
+        # Step 2c: Fetch deals (if planned)
+        deals_data: Optional[Dict[str, Any]] = None
+        if plan.fetch_deals:
+            deals_data = self._call_tool_sync(
+                "get_recent_deals", min_score=c.min_score
+            )
+            # Apply max_deals limit
+            if deals_data.get("ok") and c.max_deals > 0:
+                deals_data["deals"] = deals_data["deals"][:c.max_deals]
+                deals_data["deal_count"] = len(deals_data["deals"])
+            steps.append({
+                "step": "deals",
+                "tool": "get_recent_deals",
+                "result": deals_data,
+            })
+
+        # Step 2d: Analyze specific products (if planned)
+        analyses: List[Dict[str, Any]] = []
+        for product in plan.analyze_products:
+            analysis = self._call_tool_sync("analyze_deal", product_name=product)
+            analyses.append({"product": product, "result": analysis})
+        if analyses:
+            steps.append({
+                "step": "analyze",
+                "tool": "analyze_deal",
+                "result": analyses,
+            })
+
+        # Phase 3: Build final result
+        result: Dict[str, Any] = {}
+        if deals_data and deals_data.get("ok"):
+            result["deals"] = deals_data["deals"]
+            result["deal_count"] = deals_data["deal_count"]
+            result["run_id"] = deals_data.get("run_id")
+        if scan_data and scan_data.get("ok"):
+            result["scan_run_id"] = scan_data.get("run_id")
+            result["scan_summary"] = scan_data.get("summary", "")
+        if health_data and health_data.get("ok"):
+            result["health"] = {
+                "overall_response_rate": health_data.get("overall_response_rate"),
+                "latest_run_id": health_data.get("latest_run_id"),
+            }
+        if analyses:
+            result["analyses"] = analyses
+
+        summary = self._build_summary(plan, steps, result)
+
+        return {
+            "ok": True,
+            "goal": goal,
+            "plan": plan.to_dict(),
+            "steps": steps,
+            "result": result,
+            "summary": summary,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    # ═════════════════════════════════════════════════════════════
+    #  Planning logic
+    # ═════════════════════════════════════════════════════════════
+
+    def _plan(self, goal: str, c: Constraints) -> Plan:
+        """Decide what to do based on the goal string and constraints.
+
+        The planning is keyword-based (not LLM) — it looks for
+        scan/analyze/deals/health keywords in the goal and combines
+        them with the structured constraints to build a Plan.
+
+        If the goal is empty or unrecognizable, it defaults to "auto"
+        mode: check health → scan if healthy → fetch deals.
+        """
+        goal_lower = goal.lower().strip()
+        rationale: List[str] = []
+
+        # Parse intent from goal keywords
+        wants_scan = any(k in goal_lower for k in self._SCAN_KEYWORDS)
+        wants_analyze = any(k in goal_lower for k in self._ANALYZE_KEYWORDS)
+        wants_deals = any(k in goal_lower for k in self._DEALS_KEYWORDS)
+        wants_health = any(k in goal_lower for k in self._HEALTH_KEYWORDS)
+
+        # Focus products: if constraints specify products, analyze them
+        focus_products = c.focus_products.copy()
+
+        # If goal mentions specific products (quoted or after "analyze")
+        # Try to extract product names — simple heuristic: words after
+        # "analyze" or "נתח" up to "and" / "ולבדוק" / comma
+        if wants_analyze and not focus_products:
+            for marker in ("analyze", "נתח", "בדוק מוצר", "היסטוריה"):
+                if marker in goal_lower:
+                    # Take everything after the marker, split on common separators
+                    after = goal_lower.split(marker, 1)[-1].strip()
+                    # Cut at "and" / "ולבדוק" / "ובדוק" / "and check" / comma
+                    for sep in [" and ", " ולבדוק", " ובדוק", " and check", ",", " ו"]:
+                        if sep in after:
+                            after = after.split(sep, 1)[0].strip()
+                            break
+                    if after and len(after) > 2:
+                        focus_products.append(after)
+                    break
+
+        # Default: if no intent detected, go "auto"
+        if not any([wants_scan, wants_analyze, wants_deals, wants_health]):
+            rationale.append("No specific intent detected — defaulting to auto mode")
+            wants_scan = True
+            wants_deals = True
+            wants_health = True
+
+        # Build plan
+        plan = Plan(
+            intent="scan" if wants_scan else ("analyze" if wants_analyze else
+                   ("deals" if wants_deals else ("health" if wants_health else "auto"))),
+            check_health=wants_health or wants_scan,  # check health before scan
+            run_scan=wants_scan,
+            scan_tool="run_tracked_products_scan" if c.tracked_only else "run_full_scan",
+            fetch_deals=wants_deals or wants_scan,  # always fetch deals after scan
+            analyze_products=focus_products,
+            rationale=rationale,
+        )
+
+        # If only analyzing specific products, no need to scan
+        if focus_products and not wants_scan:
+            plan.run_scan = False
+            plan.check_health = False
+            plan.fetch_deals = wants_deals  # still may want deals alongside
+
+        if plan.run_scan:
+            plan.rationale.append(
+                f"Will scan via {plan.scan_tool} (tracked_only={c.tracked_only})"
+            )
+        if plan.fetch_deals:
+            plan.rationale.append(f"Will fetch deals with min_score={c.min_score}")
+        if plan.analyze_products:
+            plan.rationale.append(f"Will analyze: {', '.join(plan.analyze_products)}")
+
+        return plan
+
+    # ═════════════════════════════════════════════════════════════
+    #  Tool execution helpers
+    # ═════════════════════════════════════════════════════════════
+
+    def _normalize_constraints(
+        self, constraints: Optional[Constraints | Dict[str, Any]]
+    ) -> Constraints:
+        """Accept either a Constraints dataclass or a plain dict."""
+        if constraints is None:
+            return Constraints()
+        if isinstance(constraints, Constraints):
+            return constraints
+        if isinstance(constraints, dict):
+            return Constraints(**{k: v for k, v in constraints.items()
+                                   if k in Constraints.__dataclass_fields__})
+        return Constraints()
+
+    def _call_tool_sync(self, tool_name: str, **kwargs) -> Dict[str, Any]:
+        """Call a sync tool from turki_tools by name."""
+        from src.tools.turki_tools import (
+            get_recent_deals,
+            get_scraper_health_report,
+            analyze_deal,
+        )
+        tools = {
+            "get_recent_deals": get_recent_deals,
+            "get_scraper_health_report": get_scraper_health_report,
+            "analyze_deal": analyze_deal,
+        }
+        fn = tools.get(tool_name)
+        if not fn:
+            return {"ok": False, "error": f"unknown sync tool: {tool_name}"}
+        try:
+            return fn(**kwargs)
+        except Exception as exc:
+            logger.exception("Tool %s failed", tool_name)
+            return {"ok": False, "error": str(exc)}
+
+    async def _call_tool_async(self, tool_name: str, **kwargs) -> Dict[str, Any]:
+        """Call an async tool from turki_tools by name."""
+        from src.tools.turki_tools import (
+            run_full_scan,
+            run_tracked_products_scan,
+        )
+        tools = {
+            "run_full_scan": run_full_scan,
+            "run_tracked_products_scan": run_tracked_products_scan,
+        }
+        fn = tools.get(tool_name)
+        if not fn:
+            return {"ok": False, "error": f"unknown async tool: {tool_name}"}
+        try:
+            return await fn(**kwargs)
+        except Exception as exc:
+            logger.exception("Tool %s failed", tool_name)
+            return {"ok": False, "error": str(exc)}
+
+    def _summarize_scan_result(self, scan: Dict[str, Any]) -> Dict[str, Any]:
+        """Slim down scan result for the steps log (don't repeat full summary)."""
+        if not scan.get("ok"):
+            return scan
+        return {
+            "ok": True,
+            "run_id": scan.get("run_id"),
+            "queries": scan.get("queries"),
+            "deal_count": len(scan.get("deals", [])),
+            "stores_checked": scan.get("stores_checked"),
+            "stores_responded": scan.get("stores_responded"),
+        }
+
+    # ═════════════════════════════════════════════════════════════
+    #  Summary builder
+    # ═════════════════════════════════════════════════════════════
+
+    def _build_summary(
+        self, plan: Plan, steps: List[Dict[str, Any]], result: Dict[str, Any]
+    ) -> str:
+        """Build a human-readable summary of what happened."""
+        lines: List[str] = []
+
+        # Decisions
+        if plan.rationale:
+            lines.append("📋 Decisions:")
+            for r in plan.rationale:
+                lines.append(f"  • {r}")
+
+        # Health
+        for step in steps:
+            if step["step"] == "health_check":
+                r = step["result"]
+                if r.get("ok"):
+                    rate = r.get("overall_response_rate", 0)
+                    lines.append(f"🩺 Health: {rate:.0%} response rate (last {r.get('period_days')}d)")
+
+        # Scan
+        for step in steps:
+            if step["step"] == "scan":
+                r = step["result"]
+                if r.get("ok"):
+                    lines.append(
+                        f"🔎 Scan: {r.get('stores_responded', 0)}/{r.get('stores_checked', 0)} "
+                        f"stores responded, {r.get('deal_count', 0)} deals found"
+                    )
+                else:
+                    lines.append(f"❌ Scan failed: {r.get('error', 'unknown')}")
+
+        # Deals
+        deal_count = result.get("deal_count", 0)
+        if deal_count:
+            lines.append(f"💰 Deals: {deal_count} deals above threshold")
+
+        # Analyses
+        analyses = result.get("analyses", [])
+        for a in analyses:
+            r = a["result"]
+            if r.get("ok"):
+                deal = "✅ meaningful deal" if r.get("is_meaningful_deal") else "❌ not a deal"
+                lines.append(f"📊 {a['product']}: {deal} ({r.get('savings_percent')}% vs Turki)")
+
+        if not lines:
+            lines.append("No actions taken.")
+
+        return "\n".join(lines)
+
+    # ═════════════════════════════════════════════════════════════
+    #  Backward-compatible methods (unchanged API)
+    # ═════════════════════════════════════════════════════════════
+
     async def run_query(self, query: str, save_to_db: bool = True) -> PriceReport:
         """Run the full pipeline for a single query.
+
+        Backward-compatible with the old OrchestratorAgent. Delegates
+        to run.py's search_all + build_report internally.
 
         Args:
             query: Product search term (e.g., "וודקה בלוגה ליטר")
@@ -79,7 +541,6 @@ class OrchestratorAgent:
         Returns:
             PriceReport with deals, anomalies, and per-product comparison
         """
-        # Import here to avoid circular imports
         from run import search_all, build_report, PlaywrightEngine
 
         init_db()
@@ -88,19 +549,12 @@ class OrchestratorAgent:
         logger.info("Orchestrator: starting query=%r run_id=%s", query, run_id)
 
         try:
-            # Phase 1: Search
             all_prices = await asyncio.wait_for(
                 search_all(query), timeout=self.timeout
             )
-
-            # Phase 2: Extract (clean + filter — already done inside search_all,
-            # but we can enhance here)
             filtered = self._filter_prices(all_prices, query)
-
-            # Phase 3: Analyze
             report = build_report(filtered, query)
 
-            # Phase 4: Persist health metrics
             if save_to_db:
                 self._log_scraper_health(run_id, query, report)
 
@@ -108,7 +562,6 @@ class OrchestratorAgent:
                 "Orchestrator: query=%r done | %d stores responded | %d deals | %d anomalies",
                 query, report.stores_responded, len(report.deals_found), len(report.anomalies),
             )
-
             return report
 
         except asyncio.TimeoutError:
@@ -132,6 +585,8 @@ class OrchestratorAgent:
     async def run_tracked(self) -> List[PriceReport]:
         """Run the full pipeline for all tracked queries from the DB.
 
+        Backward-compatible method.
+
         Returns:
             List of PriceReports, one per tracked query
         """
@@ -154,11 +609,12 @@ class OrchestratorAgent:
         for query in queries:
             report = await self.run_query(query)
             reports.append(report)
-
         return reports
 
     async def run_batch(self, queries: List[str]) -> List[PriceReport]:
         """Run the full pipeline for a custom list of queries.
+
+        Backward-compatible method.
 
         Args:
             queries: List of product search terms
@@ -173,25 +629,26 @@ class OrchestratorAgent:
             reports.append(report)
         return reports
 
+    # ═════════════════════════════════════════════════════════════
+    #  Legacy helper methods (unchanged)
+    # ═════════════════════════════════════════════════════════════
+
     def _filter_prices(
         self, all_prices: Dict[str, List[ProductPrice]], query: str
     ) -> Dict[str, List[ProductPrice]]:
         """Clean product names and filter bogus/irrelevant results.
 
-        This is a defensive pass — search_all already filters, but
-        we run it again in case scrapers returned dirty data.
+        Defensive pass — search_all already filters, but we run it
+        again in case scrapers returned dirty data.
         """
         filtered = {}
         for store_name, products in all_prices.items():
             clean_products = []
             for p in products:
-                # Clean HTML entities
                 p.product_name = clean_product_name(p.product_name)
-                # Filter bogus prices
                 price = p.sale_price or p.regular_price
                 if price and is_bogus_price(price, p.product_name):
                     continue
-                # Filter irrelevant products
                 if not is_relevant_product(p.product_name, query, min_words=2):
                     continue
                 clean_products.append(p)
@@ -199,14 +656,8 @@ class OrchestratorAgent:
                 filtered[store_name] = clean_products
         return filtered
 
-    def _log_scraper_health(
-        self, run_id: str, query: str, report: PriceReport
-    ):
-        """Log scraper health metrics to the scraper_health table.
-
-        Records per-run metrics: stores responded, response rate,
-        deal count, anomaly count, execution timestamp.
-        """
+    def _log_scraper_health(self, run_id: str, query: str, report: PriceReport):
+        """Log scraper health metrics to the scraper_health table."""
         try:
             conn = get_db()
             conn.execute("""
@@ -215,8 +666,7 @@ class OrchestratorAgent:
                  response_rate, deal_count, anomaly_count, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             """, (
-                run_id,
-                query,
+                run_id, query,
                 report.stores_checked,
                 report.stores_responded,
                 round(report.stores_responded / max(report.stores_checked, 1), 2),
@@ -231,16 +681,7 @@ class OrchestratorAgent:
     def get_price_history(
         self, product_name: str, store_name: str = None, limit: int = 50
     ) -> List[Dict]:
-        """Retrieve price history for a product across all runs.
-
-        Args:
-            product_name: Product name (or partial match)
-            store_name: Optional filter by store
-            limit: Max results (most recent first)
-
-        Returns:
-            List of dicts: date, store, regular_price, sale_price, is_on_sale
-        """
+        """Retrieve price history for a product across all runs."""
         conn = get_db()
         try:
             if store_name:
@@ -268,15 +709,7 @@ class OrchestratorAgent:
     def get_deal_scores(
         self, product_name: str = None, limit: int = 20
     ) -> List[Dict]:
-        """Retrieve deal scores — best historical deals recorded.
-
-        Args:
-            product_name: Optional filter
-            limit: Max results (highest score first)
-
-        Returns:
-            List of dicts: product, store, score, savings, percent, date
-        """
+        """Retrieve deal scores — best historical deals recorded."""
         conn = get_db()
         try:
             if product_name:
@@ -297,14 +730,7 @@ class OrchestratorAgent:
             conn.close()
 
     def get_scraper_health_summary(self, days: int = 7) -> List[Dict]:
-        """Get scraper health summary for the last N days.
-
-        Args:
-            days: Look-back window
-
-        Returns:
-            List of dicts: query, avg_response_rate, total_runs, avg_deals
-        """
+        """Get scraper health summary for the last N days."""
         conn = get_db()
         try:
             rows = conn.execute(
@@ -327,17 +753,14 @@ class OrchestratorAgent:
         """Quick pipeline status summary for monitoring."""
         conn = get_db()
         try:
-            # Total runs
             total_runs = conn.execute(
                 "SELECT COUNT(DISTINCT run_id) FROM price_results"
             ).fetchone()[0]
 
-            # Total products tracked
             total_tracked = conn.execute(
                 "SELECT COUNT(*) FROM tracked_queries"
             ).fetchone()[0]
 
-            # Recent response rate (last 10 runs)
             recent = conn.execute(
                 """SELECT AVG(response_rate) as avg_rate
                    FROM scraper_health
@@ -349,7 +772,63 @@ class OrchestratorAgent:
                 "total_runs": total_runs,
                 "tracked_products": total_tracked,
                 "avg_response_rate_10": round(avg_rate, 2),
-                "db_path": str(getattr(__import__('src.storage.sqlite_store', fromlist=['DB_PATH']), 'DB_PATH')),
+                "db_path": str(getattr(
+                    __import__('src.storage.sqlite_store', fromlist=['DB_PATH']),
+                    'DB_PATH'
+                )),
             }
         finally:
             conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+#  CLI example
+# ════════════════════════════════════════════════════════════════════
+
+async def _example() -> None:
+    """Demonstrate the new Orchestrator with several scenarios."""
+    import json
+    orch = OrchestratorAgent()
+
+    def _print(label: str, result: Dict[str, Any]) -> None:
+        print(f"\n{'═' * 60}")
+        print(f"  {label}")
+        print(f"{'═' * 60}")
+        print(json.dumps(result, ensure_ascii=False, indent=2)[:3000])
+
+    # Scenario 1: Health check only (no scan)
+    print("\n" + "█" * 60)
+    print("  Scenario 1: Check health only")
+    print("█" * 60)
+    r1 = await orch.execute("check scraper health", constraints={"health_days": 7})
+    _print("Result", r1)
+
+    # Scenario 2: Get recent deals (no scan)
+    print("\n" + "█" * 60)
+    print("  Scenario 2: Get recent deals")
+    print("█" * 60)
+    r2 = await orch.execute("show me recent deals", constraints={"min_score": 0})
+    _print("Result", r2)
+
+    # Scenario 3: Analyze a product (no scan)
+    print("\n" + "█" * 60)
+    print("  Scenario 3: Analyze בלוגה")
+    print("█" * 60)
+    r3 = await orch.execute("analyze בלוגה and check recent deals", constraints={"min_score": 50})
+    _print("Result", r3)
+
+    # Scenario 4: Full smart flow (health gate + scan + deals)
+    # Uncomment to run a live ~15 min scan:
+    # print("\n" + "█" * 60)
+    # print("  Scenario 4: Full smart scan")
+    # print("█" * 60)
+    # r4 = await orch.execute("scan tracked products and report strong deals",
+    #     constraints={"min_score": 70, "health_threshold": 0.4})
+    # _print("Result", r4)
+
+    print("\n✅ Orchestrator smoke test complete.")
+    print("   Uncomment Scenario 4 to run a live scan.")
+
+
+if __name__ == "__main__":
+    asyncio.run(_example())
