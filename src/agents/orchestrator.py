@@ -214,6 +214,8 @@ class OrchestratorAgent:
         self,
         goal: str = "",
         constraints: Optional[Constraints | Dict[str, Any]] = None,
+        include_recommendations: bool = False,
+        strategist_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute a high-level goal with optional constraints.
 
@@ -230,10 +232,20 @@ class OrchestratorAgent:
             constraints: Either a Constraints dataclass or a dict with
                 any of: min_score, health_threshold, health_days,
                 focus_products, tracked_only, max_deals, scan_timeout.
+            include_recommendations: If True, automatically calls
+                ``StrategistAgent.generate_recommendations()`` after the
+                normal flow and attaches results under ``"recommendations"``.
+                Default False (backward compatible).
+            strategist_context: Optional context dict passed to the
+                Strategist (gap_history, stock_status, turki_promotions,
+                previous_recommendations). Only used when
+                include_recommendations=True.
 
         Returns:
             ``{"ok": True, "goal": str, "plan": {...}, "steps": [...],
-               "result": {...}, "summary": str}``
+               "result": {...}, "summary": str, "metrics": {...}``
+            When include_recommendations=True, also includes
+            ``"recommendations": {...}`` with Strategist output.
         """
         # Normalize constraints
         c = self._normalize_constraints(constraints)
@@ -327,7 +339,7 @@ class OrchestratorAgent:
 
         summary = self._build_summary(plan, steps, result)
 
-        return {
+        output = {
             "ok": True,
             "goal": goal,
             "plan": plan.to_dict(),
@@ -337,6 +349,29 @@ class OrchestratorAgent:
             "metrics": self.get_metrics(),
             "timestamp": datetime.now().isoformat(),
         }
+
+        # Phase 4 (optional): Strategist recommendations
+        if include_recommendations:
+            try:
+                from src.agents.strategist import StrategistAgent
+                strategist = StrategistAgent()
+                rec_result = strategist.generate_recommendations(
+                    output, context=strategist_context
+                )
+                output["recommendations"] = rec_result
+                if rec_result.get("ok") and rec_result.get("recommendations"):
+                    rec_summary = rec_result.get("summary", "")
+                    if rec_summary:
+                        output["summary"] = f"{summary}\n\n{rec_summary}"
+            except Exception as exc:
+                logger.warning("Strategist integration failed: %s", exc)
+                output["recommendations"] = {
+                    "ok": False,
+                    "error": f"Strategist failed: {exc}",
+                    "recommendations": [],
+                }
+
+        return output
 
     # ═════════════════════════════════════════════════════════════
     #  Planning logic
