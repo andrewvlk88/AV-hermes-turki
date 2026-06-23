@@ -226,29 +226,26 @@ class OrchestratorAgent:
         Args:
             goal: Natural-language instruction. Examples:
                 - "scan and report strong deals"
-                - "check health, then scan if healthy"
-                - "analyze בלוגה and check recent deals"
-                - "just show me recent deals"
-            constraints: Either a Constraints dataclass or a dict with
-                any of: min_score, health_threshold, health_days,
-                focus_products, tracked_only, max_deals, scan_timeout.
-            include_recommendations: If True, automatically calls
-                ``StrategistAgent.generate_recommendations()`` after the
-                normal flow and attaches results under ``"recommendations"``.
-                Default False (backward compatible).
-            strategist_context: Optional context dict passed to the
-                Strategist (gap_history, stock_status, turki_promotions,
-                previous_recommendations). Only used when
-                include_recommendations=True.
-
-        Returns:
-            ``{"ok": True, "goal": str, "plan": {...}, "steps": [...],
-               "result": {...}, "summary": str, "metrics": {...}``
-            When include_recommendations=True, also includes
-            ``"recommendations": {...}`` with Strategist output.
+                - "analyze the following: product1, product2"
+            constraints: ...
         """
         # Normalize constraints
         c = self._normalize_constraints(constraints)
+
+        # ── SMART INPUT PARSING ──────────────────────────────────────
+        # If the goal lists products (comma or newline separated), make sure
+        # they are passed to the plan as a list, NOT as a single string "these products".
+        if "analyze" in goal.lower() and not c.focus_products:
+            # Simple heuristic to extract list after "analyze"
+            parts = goal.split("analyze", 1)
+            if len(parts) > 1:
+                potential_products = parts[1].split(',')
+                # Clean up: strip whitespace, remove empty entries
+                extracted = [p.strip() for p in potential_products if len(p.strip()) > 2]
+                if extracted:
+                    c.focus_products = extracted
+                    # Update goal string to be clean for the LLM planner
+                    goal = f"analyze these products: {', '.join(extracted)}"
 
         # Phase 1: Plan
         plan = self._plan(goal, c)
