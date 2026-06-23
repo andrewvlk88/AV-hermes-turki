@@ -76,10 +76,33 @@ def is_mini_product(name: str) -> bool:
 def is_accessory(name: str) -> bool:
     """Check if a product name indicates a non-alcohol accessory (glasses, sets, etc.)."""
     name_lower = name.lower()
+    
+    # Direct keyword match
     for keyword in ACCESORY_KEYWORDS:
         if keyword.lower() in name_lower:
             return True
+    
+    # Aggressive: any word starting with "מארז" (bundle) — catches attached words
+    if re.search(r'\bמארז', name_lower):
+        return True
+    
+    # Any word starting with "מיניאטור" (miniature)
+    if re.search(r'\bמיניאטור', name_lower):
+        return True
+    
+    # Gift box with food/glass extras
+    if re.search(r'\bמתנה\b', name_lower) and re.search(r'\b(כוס|כוסות|פרלין|פרלינים|פיצוח|פיצוחים|טוניק|שוקולד|קרח)\b', name_lower):
+        return True
+    
     return False
+
+
+# Compile a regex for is_accessory internal use
+_ACCESSORY_RE = re.compile(
+    r'\b(מארז|מיניאטור|כוסות?|מתנה|שוט|פקק|מפתח|מגן|אחסון|קופסא|סירופ|סאקה|מיקס|מונין|'
+    r'glasses|glass|shot|opener|gift|set|box|bundle|miniature)',
+    re.IGNORECASE
+)
 
 
 def is_bogus_price(price: float, product_name: str) -> bool:
