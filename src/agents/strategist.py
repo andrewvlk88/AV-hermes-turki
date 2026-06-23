@@ -157,6 +157,7 @@ class StrategistAgent:
                 - ``previous_recommendations``: list of prior recs for these products
                 - ``turki_promotions``: list of products currently on promotion at Turki
                 - ``stock_status``: {product_name: "in_stock"|"low"|"out"}
+                - ``competitor_deal_count``: {store_name: number_of_deals_from_that_store}
 
         Returns:
             ``{"ok": True, "recommendations": [...], "summary": str,
@@ -275,6 +276,10 @@ class StrategistAgent:
         previous_recs = ctx.get("previous_recommendations", [])
         turki_promos = ctx.get("turki_promotions", [])
         stock_status = ctx.get("stock_status", {})
+        competitor_deal_count = ctx.get("competitor_deal_count", {})
+
+        # Flag: no deals but analyses exist → prompt should emphasize analyses
+        no_deals_mode = len(deal_summaries) == 0 and len(analysis_summaries) > 0
 
         return {
             "has_data": has_data,
@@ -290,6 +295,9 @@ class StrategistAgent:
             "previous_recommendations": previous_recs,
             "turki_promotions": turki_promos,
             "stock_status": stock_status,
+            "competitor_deal_count": competitor_deal_count,
+            # Flags
+            "no_deals_mode": no_deals_mode,
         }
 
     # ═════════════════════════════════════════════════════════════
@@ -299,34 +307,44 @@ class StrategistAgent:
     def _build_prompt(self, extracted: Dict[str, Any]) -> str:
         """Build a high-quality prompt for DeepSeek with enriched data + context.
 
-        Improvements over v1:
-        - 4 few-shot examples covering all recommendation types
-        - Clear decision criteria for each type
-        - Suggested price calculation guidance
-        - SKU/size mismatch warning instructions
-        - Context section (gap history, previous recs, promotions, stock)
+        Three focused sub-agents contribute to the prompt:
+        - _prev_recs_prompt_section: handles previous_recommendations (confirm/update/replace)
+        - _no_deals_prompt_section: handles analysis-based fallback when deals are empty
+        - _competitor_aggression_prompt_section: detects Competitor Aggressive patterns
         """
         deals_json = json.dumps(extracted["deals"], ensure_ascii=False, indent=2)
         analyses_json = json.dumps(extracted["analyses"], ensure_ascii=False, indent=2)
         health = extracted.get("health", {})
 
-        # ── Context section (only if data exists) ───────────────────
+        # ── Context section ────────────────────────────────────────
         gap_history = extracted.get("gap_history", {})
         previous_recs = extracted.get("previous_recommendations", [])
         turki_promos = extracted.get("turki_promotions", [])
         stock_status = extracted.get("stock_status", {})
+        competitor_deal_count = extracted.get("competitor_deal_count", {})
+        no_deals_mode = extracted.get("no_deals_mode", False)
 
         context_section = ""
         if gap_history:
             context_section += f"\n### Gap History (last 30 days)\n{json.dumps(gap_history, ensure_ascii=False, indent=2)}\n"
-        if previous_recs:
-            context_section += f"\n### Previous Recommendations\n{json.dumps(previous_recs[:5], ensure_ascii=False, indent=2)}\n"
+
+        # Agent 1: Previous Recommendations Handler
+        context_section += self._prev_recs_prompt_section(previous_recs)
+
         if turki_promos:
             context_section += f"\n### Products Currently on Promotion at Turki\n{json.dumps(turki_promos, ensure_ascii=False)}\n"
         if stock_status:
             context_section += f"\n### Stock Status\n{json.dumps(stock_status, ensure_ascii=False, indent=2)}\n"
 
-        # ── Few-shot examples ───────────────────────────────────────
+        # Agent 3: Competitor Aggressiveness Detection
+        context_section += self._competitor_aggression_prompt_section(
+            competitor_deal_count, extracted["deals"]
+        )
+
+        # ── No-deals mode notice (Agent 2) ─────────────────────────
+        no_deals_notice = self._no_deals_prompt_section(no_deals_mode)
+
+        # ── Few-shot examples (expanded with prev recs + aggression + no-deals) ──
         examples = """## Examples
 
 ### Example 1: Price Action — large gap
@@ -347,7 +365,27 @@ Output:
 ### Example 4: Stock Opportunity
 Input: רוסקי סטנדרט ליטר, אלכוהום 85₪, Turki 109₪, savings 22%, stock_status: אלכוהום=out_of_stock
 Output:
-{"recommendation_type": "Stock Opportunity", "products": ["וודקה רוסקי סטנדרט ליטר"], "action": "שמור מחיר 109₪ — המתחרה מחוץ למלאי, אין צורך להוריד", "reasoning": "Competitor is 22% cheaper but out of stock. No immediate threat. Hold price and monitor restock.", "priority": "Low", "confidence": 85}"""
+{"recommendation_type": "Stock Opportunity", "products": ["וודקה רוסקי סטנדרט ליטר"], "action": "שמור מחיר 109₪ — המתחרה מחוץ למלאי, אין צורך להוריד", "reasoning": "Competitor is 22% cheaper but out of stock. No immediate threat. Hold price and monitor restock.", "priority": "Low", "confidence": 85}
+
+### Example 5: Confirm previous recommendation
+Input: ג'וני ווקר בלאק ליטר, בנא 110₪, Turki 125₪, savings 12%, previous_rec: Price Action ל-115₪ Medium
+Output:
+{"recommendation_type": "Price Action", "products": ["ג'וני ווקר בלאק לייבל ליטר"], "action": "אשר המלצה קודמת — הורד ל-115₪, הפער נשמר", "reasoning": "CONFIRM previous rec: gap remains at 12% (110 vs 125). Previous recommendation to lower to 115₪ is still valid. No change needed.", "priority": "Medium", "confidence": 85}
+
+### Example 6: Update previous recommendation (gap widened)
+Input: ג'וני ווקר בלאק ליטר, בנא 100₪, Turki 125₪, savings 20%, previous_rec: Price Action ל-115₪ Medium, gap_history=5
+Output:
+{"recommendation_type": "Price Action", "products": ["ג'וני ווקר בלאק לייבל ליטר"], "action": "עדכן: הורד ל-97₪ — הפער גדל ל-20%, המלצה קודמת כבר לא רלוונטית", "reasoning": "UPDATE previous rec: gap widened from 12% to 20% and 5 gaps in 30 days. Previous 115₪ target is no longer sufficient. New target: 100*0.97=97₪.", "priority": "High", "confidence": 90}
+
+### Example 7: Competitor Aggressive
+Input: בנא משקאות has 4 deals across different products, competitor_deal_count: {בנא משקאות: 4}
+Output:
+{"recommendation_type": "Competitor Aggressive", "products": ["בלוגה", "רוסקי סטנדרט", "ג'וני ווקר בלאק", "גלנמורנג'י 12"], "action": "תגובה אסטרטגית: בנא משקאות תוקפת ב-4 מוצרים — שקול מבצע כולל או מו"מ עם ספק", "reasoning": "בנא משקאות undercuts Turki on 4 different products. This is a coordinated aggressive strategy, not isolated deals. Strategic response needed.", "priority": "High", "confidence": 85}
+
+### Example 8: Analysis-based recommendation (no deals)
+Input: No deals found. Analysis shows בלוגה avg=231₪, min=119.9₪, max=889.9₪, cheapest_store=פאנקו at 119.9₪, Turki=319₪
+Output:
+{"recommendation_type": "Monitor", "products": ["בלוגה"], "action": "בדוק תמחור — המחיר הממוצע בשוק 231₪, טורקי גבוה ב-38%", "reasoning": "No live deals but analysis shows Turki at 319₪ vs market avg 231₪ (38% above average). Price may be uncompetitive. Investigate specific SKU match.", "priority": "Medium", "confidence": 60}"""
 
         return f"""You are a senior business strategist for 'הטורקי' (Turki), Israel's largest liquor store chain.
 Your job: analyze competitor pricing data and generate actionable recommendations for the owner (Shmulik).
@@ -361,7 +399,7 @@ Your job: analyze competitor pricing data and generate actionable recommendation
 {analyses_json}
 
 ### Scraper Health: response_rate={health.get('overall_response_rate', 'N/A')}
-{context_section}
+{context_section}{no_deals_notice}
 ## Recommendation Types & Decision Criteria
 
 1. **Price Action** — Competitor is >10% cheaper AND in stock.
@@ -382,6 +420,8 @@ Your job: analyze competitor pricing data and generate actionable recommendation
    - Priority: Low. Confidence: 30-50.
 
 5. **Competitor Aggressive** — Same competitor undercuts Turki on 3+ products.
+   - Check competitor_deal_count in context. If a store has 3+ deals, generate one Competitor Aggressive rec.
+   - List ALL affected products in the products field.
    - Strategic response needed, not just per-product price cuts.
    - Priority: High. Confidence: 80+.
 
@@ -398,16 +438,106 @@ Your job: analyze competitor pricing data and generate actionable recommendation
 - If gap_history shows 3+ gaps for same product in 30 days, escalate priority.
 - If turki_promotions includes a product, note it (don't recommend lowering price if already on promo).
 - If stock_status shows competitor "out" or "low", consider Stock Opportunity instead of Price Action.
-- If price_stats show suspiciously wide range (min/max ratio >3:1), flag possible SKU mismatch → Ignore.
+- If price_stats show suspiciously wide range (min/max ratio >3:1), flag possible SKU mismatch -> Ignore.
+- If previous_recommendations exist, you MUST reference them using CONFIRM/UPDATE/REPLACE/IGNORE:
+  - CONFIRM: previous rec is still valid, repeat it with "אשר המלצה קודמת" in action.
+  - UPDATE: situation changed, adjust the rec with "עדכן" in action and explain what changed.
+  - REPLACE: previous rec type was wrong, use a different type with "החלף" in action.
+  - IGNORE: previous rec is no longer relevant, use Ignore type with "המלצה קודמת בוטלה" in action.
+- If no deals are available but analyses exist, generate recommendations based on price_stats and analysis trends.
+- If competitor_deal_count shows a store with 3+ deals, generate ONE Competitor Aggressive rec for that store.
 
 {examples}
 
 Return ONLY a valid JSON array of recommendation objects. No markdown, no explanation."""
 
     # ═════════════════════════════════════════════════════════════
-    #  Phase 3: Call LLM
+    #  Agent 1: Previous Recommendations Handler
     # ═════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _prev_recs_prompt_section(previous_recs: List[Dict]) -> str:
+        """Agent 1: Generate prompt section for previous recommendations.
+
+        Teaches the LLM to respond with CONFIRM/UPDATE/REPLACE/IGNORE
+        when previous recommendations exist for the same products.
+        """
+        if not previous_recs:
+            return ""
+        recs_json = json.dumps(previous_recs[:5], ensure_ascii=False, indent=2)
+        return (
+            f"\n### Previous Recommendations (must reference these)\n{recs_json}\n"
+            "\n**CRITICAL**: For each product that has a previous recommendation, you MUST\n"
+            "include a reference to it in your reasoning using one of:\n"
+            "- CONFIRM: previous rec is still valid (gap unchanged or narrowed)\n"
+            "- UPDATE: situation changed (gap widened, new data, stock changed)\n"
+            "- REPLACE: previous rec type was wrong (e.g., was Price Action, should be Monitor)\n"
+            "- IGNORE: previous rec is no longer relevant (product no longer appears in deals)\n"
+            'Example: "CONFIRM previous rec: gap remains at 12%..."\n'
+        )
+
+    # ═════════════════════════════════════════════════════════════
+    #  Agent 2: No-Deals / Analysis-Based Recommendations
+    # ═════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _no_deals_prompt_section(no_deals_mode: bool) -> str:
+        """Agent 2: Generate prompt section for no-deals fallback mode.
+
+        When there are no live deals but analyses exist, instruct the LLM
+        to generate recommendations based on price_stats trends and
+        cheapest_store data instead of returning empty results.
+        """
+        if not no_deals_mode:
+            return ""
+        return (
+            "\n### NO DEALS MODE\n"
+            "No live deals were found in the latest scan, but product analyses are available.\n"
+            "You MUST still generate recommendations based on the analysis data:\n"
+            "- Compare Turki's latest price to market average (price_stats.avg).\n"
+            "- If Turki is >20% above market average -> Price Action (lower to avg*0.97).\n"
+            "- If Turki is 10-20% above average -> Monitor.\n"
+            "- If cheapest_store is much cheaper than Turki -> investigate why (SKU mismatch?).\n"
+            "- Use price_stats.min/max/count to assess data reliability.\n"
+            "- Confidence should be lower (60-80) since these are trend-based, not live gaps.\n"
+        )
+
+    # ═════════════════════════════════════════════════════════════
+    #  Agent 3: Competitor Aggressiveness Detection
+    # ═════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _competitor_aggression_prompt_section(
+        competitor_deal_count: Dict[str, int], deals: List[Dict]
+    ) -> str:
+        """Agent 3: Generate prompt section for competitor aggression detection.
+
+        If competitor_deal_count is provided, show it and instruct the LLM
+        to generate a Competitor Aggressive rec for any store with 3+ deals.
+        If not provided, auto-compute from the deals list as a fallback.
+        """
+        # Auto-compute if not provided
+        if not competitor_deal_count and deals:
+            computed: Dict[str, int] = {}
+            for d in deals:
+                store = d.get("store", d.get("store_name", ""))
+                if store:
+                    computed[store] = computed.get(store, 0) + 1
+            competitor_deal_count = computed
+
+        if not competitor_deal_count:
+            return ""
+
+        aggressive_stores = {s: n for s, n in competitor_deal_count.items() if n >= 3}
+        if not aggressive_stores:
+            return f"\n### Competitor Deal Count\n{json.dumps(competitor_deal_count, ensure_ascii=False)}\n"
+
+        return (
+            f"\n### Competitor Deal Count\n{json.dumps(competitor_deal_count, ensure_ascii=False)}\n"
+            f"\n**AGGRESSIVE COMPETITOR DETECTED**: {', '.join(f'{s} ({n} deals)' for s, n in aggressive_stores.items())}\n"
+            "This competitor undercuts Turki on 3+ products. You MUST generate ONE\n"
+            "'Competitor Aggressive' recommendation listing ALL affected products.\n"
+        )
     def _call_llm(self, prompt: str) -> Optional[List[Dict]]:
         """Send prompt to DeepSeek V4 Flash and parse the JSON response.
 
