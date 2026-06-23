@@ -295,6 +295,55 @@ result = await orch.execute("check scraper health")
 
 ---
 
+## 🧠 Strategist Agent
+
+ה-`StrategistAgent` (`src/agents/strategist.py`) הוא איש האסטרטגיה העסקית של המערכת — מקבל את הפלט של ה-Orchestrator (דילים, ניתוחים, בריאות סקרייפרים) ומייצר **המלצות פעולה** עבור בעל החנות (שמוליק).
+
+**איך זה עובד:**
+
+```
+generate_recommendations(orchestrator_result)
+    │
+    ├─ 1. Extract — שולף דילים, ניתוחים, health מהפלט
+    ├─ 2. Enrich — מוסיף הקשר (מחיר טורקי, % חיסכון, סטטיסטיקה)
+    ├─ 3. LLM Reasoning — DeepSeek V4 Flash → המלצות מובנות
+    └─ 4. Return — רשימת Recommendation objects
+```
+
+**סוגי המלצות:**
+
+| סוג | מתי | דוגמה |
+|---|---|---|
+| **Price Action** | מתחרה זול ב-10%+ | "הורד מחיר ל-150₪ כדי להתחרות בבנא" |
+| **Promotion** | מתחרה במבצע | "הצע מבצע נגדי או דחיפה שיווקית" |
+| **Monitor** | פער קטן/לא ברור | "עקוב אחר המחיר — פער קטן" |
+| **Ignore** | אין פער משמעותי | פעולה לא נדרשת |
+
+**Fallback:** אם ה-LLM לא זמין, ה-Strategist מייצר המלצות rule-based (חישוב פשוט לפי % חיסכון).
+
+**שימוש:**
+
+```python
+from src.agents.orchestrator import OrchestratorAgent
+from src.agents.strategist import StrategistAgent
+
+# Step 1: Orchestrator collects data
+orch = OrchestratorAgent()
+orch_result = await orch.execute("show me recent deals", constraints={"min_score": 50})
+
+# Step 2: Strategist generates recommendations
+strategist = StrategistAgent()
+recs = strategist.generate_recommendations(orch_result)
+
+for rec in recs["recommendations"]:
+    print(f"[{rec['priority']}] {rec['recommendation_type']}: {rec['action']}")
+    print(f"  Confidence: {rec['confidence']}%")
+```
+
+**הפרדת אחריות:** ה-Orchestrator אוסף נתונים, ה-Strategist מייצר בינה עסקית. ה-Strategist לא קורא ל-Orchestrator — הוא רק צורך את הפלט שלו.
+
+---
+
 ## 📜 License
 
 Personal project — Andrew Volkov (@andrewvlk88)
