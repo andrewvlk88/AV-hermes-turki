@@ -67,10 +67,16 @@ class Recommendation:
     """A single business recommendation for the store owner.
 
     Attributes:
-        recommendation_type: One of: Price Action, Promotion, Monitor, Ignore
+        recommendation_type: One of:
+            - Price Action: Competitor is significantly cheaper → adjust Turki's price
+            - Promotion: Competitor has a sale → counter-promotion or marketing push
+            - Monitor: Price gap is small or uncertain → watch but don't act yet
+            - Ignore: No meaningful price difference → no action needed
+            - Competitor Aggressive: Competitor consistently undercuts → strategic response
+            - Stock Opportunity: Competitor out of stock or low → Turki can raise price
         products: List of product names this recommendation applies to
-        action: Clear, actionable instruction (Hebrew or English)
-        reasoning: Short explanation of why this recommendation was made
+        action: Clear, actionable instruction (Hebrew for Shmulik)
+        reasoning: Short explanation of why this recommendation was made (English, internal)
         priority: High / Medium / Low
         confidence: 0-100, how confident the Strategist is in this recommendation
     """
@@ -115,6 +121,10 @@ class StrategistAgent:
         - **Monitor**: Price gap is small or uncertain → watch the product
           but don't act yet.
         - **Ignore**: No meaningful price difference or product not relevant.
+        - **Competitor Aggressive**: Competitor consistently undercuts Turki
+          across multiple products → strategic response needed.
+        - **Stock Opportunity**: Competitor is out of stock or low → Turki
+          can hold or raise price.
     """
 
     # ── LLM config (same Ollama Cloud pattern as llm_deals.py) ──────
@@ -131,7 +141,9 @@ class StrategistAgent:
     # ═════════════════════════════════════════════════════════════
 
     def generate_recommendations(
-        self, orchestrator_result: Dict[str, Any]
+        self,
+        orchestrator_result: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Generate business recommendations from Orchestrator output.
 
@@ -140,6 +152,11 @@ class StrategistAgent:
                 ``OrchestratorAgent.execute()``. Must contain at least a
                 ``"result"`` key with deals and/or analyses. Can also
                 include ``"health"`` and ``"plan"`` for context.
+            context: Optional dict with additional business context:
+                - ``gap_history``: {product_name: count_of_gaps_last_30d}
+                - ``previous_recommendations``: list of prior recs for these products
+                - ``turki_promotions``: list of products currently on promotion at Turki
+                - ``stock_status``: {product_name: "in_stock"|"low"|"out"}
 
         Returns:
             ``{"ok": True, "recommendations": [...], "summary": str,
@@ -147,7 +164,7 @@ class StrategistAgent:
             or ``{"ok": False, "error": str}`` on failure.
         """
         # Phase 1: Extract relevant data from orchestrator output
-        extracted = self._extract_input(orchestrator_result)
+        extracted = self._extract_input(orchestrator_result, context)
         if not extracted["has_data"]:
             return {
                 "ok": True,
@@ -192,10 +209,14 @@ class StrategistAgent:
     #  Phase 1: Extract input data
     # ═════════════════════════════════════════════════════════════
 
-    def _extract_input(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """Pull deals, analyses, and health from orchestrator output.
+    def _extract_input(
+        self, result: Dict[str, Any], context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Pull deals, analyses, health, and business context from inputs.
 
         Normalizes the data into a compact format for the LLM prompt.
+        Optional context (gap history, previous recs, promotions, stock)
+        is merged into the extracted dict for the prompt builder.
         """
         inner = result.get("result", result)  # support both shapes
         deals = inner.get("deals", [])
@@ -248,6 +269,13 @@ class StrategistAgent:
 
         has_data = bool(deal_summaries or analysis_summaries)
 
+        # Merge optional business context
+        ctx = context or {}
+        gap_history = ctx.get("gap_history", {})
+        previous_recs = ctx.get("previous_recommendations", [])
+        turki_promos = ctx.get("turki_promotions", [])
+        stock_status = ctx.get("stock_status", {})
+
         return {
             "has_data": has_data,
             "deals": deal_summaries,
@@ -257,6 +285,11 @@ class StrategistAgent:
             "products_seen": sorted(products_seen),
             "product_count": len(products_seen),
             "deal_count": len(deal_summaries),
+            # Business context for the LLM
+            "gap_history": gap_history,
+            "previous_recommendations": previous_recs,
+            "turki_promotions": turki_promos,
+            "stock_status": stock_status,
         }
 
     # ═════════════════════════════════════════════════════════════
@@ -264,43 +297,60 @@ class StrategistAgent:
     # ═════════════════════════════════════════════════════════════
 
     def _build_prompt(self, extracted: Dict[str, Any]) -> str:
-        """Build a focused prompt for DeepSeek with enriched deal/analysis data.
+        """Build a high-quality prompt for DeepSeek with enriched data + context.
 
-        The prompt includes:
-        - Role description (business advisor for Israeli liquor store)
-        - Compact deal data (product, store, prices, savings %)
-        - Analysis data (price history stats, cheapest store)
-        - Few-shot example of expected output
-        - Structured JSON output requirement
+        Improvements over v1:
+        - 4 few-shot examples covering all recommendation types
+        - Clear decision criteria for each type
+        - Suggested price calculation guidance
+        - SKU/size mismatch warning instructions
+        - Context section (gap history, previous recs, promotions, stock)
         """
         deals_json = json.dumps(extracted["deals"], ensure_ascii=False, indent=2)
         analyses_json = json.dumps(extracted["analyses"], ensure_ascii=False, indent=2)
         health = extracted.get("health", {})
 
-        # Use a triple-quoted template to avoid string escaping issues
-        example = (
-            '[\n'
-            '  {\n'
-            '    "recommendation_type": "Price Action",\n'
-            '    "products": ["וודקה בלוגה אלור 750 מל"],\n'
-            '    "action": "הורד מחיר ל-150₪ כדי להתחרות בבנא משקאות",\n'
-            '    "reasoning": "בנא משקאות sells at 150₪ vs Turki 229₪ (34% cheaper). Significant gap threatens market share.",\n'
-            '    "priority": "High",\n'
-            '    "confidence": 95\n'
-            '  },\n'
-            '  {\n'
-            '    "recommendation_type": "Monitor",\n'
-            '    "products": ["גוני ווקר בלאק לייבל 700 מל"],\n'
-            '    "action": "עקוב אחר מחיר בנא משקאות — הפער קטן אך יכול לגדול",\n'
-            '    "reasoning": "Competitor is only 8% cheaper. Not urgent but worth monitoring for further drops.",\n'
-            '    "priority": "Low",\n'
-            '    "confidence": 70\n'
-            '  }\n'
-            ']'
-        )
+        # ── Context section (only if data exists) ───────────────────
+        gap_history = extracted.get("gap_history", {})
+        previous_recs = extracted.get("previous_recommendations", [])
+        turki_promos = extracted.get("turki_promotions", [])
+        stock_status = extracted.get("stock_status", {})
 
-        return f"""You are a business strategist for 'הטורקי' (Turki), a major Israeli liquor store chain.
-Given pricing data from competitor scans, generate actionable recommendations for the store owner (Shmulik).
+        context_section = ""
+        if gap_history:
+            context_section += f"\n### Gap History (last 30 days)\n{json.dumps(gap_history, ensure_ascii=False, indent=2)}\n"
+        if previous_recs:
+            context_section += f"\n### Previous Recommendations\n{json.dumps(previous_recs[:5], ensure_ascii=False, indent=2)}\n"
+        if turki_promos:
+            context_section += f"\n### Products Currently on Promotion at Turki\n{json.dumps(turki_promos, ensure_ascii=False)}\n"
+        if stock_status:
+            context_section += f"\n### Stock Status\n{json.dumps(stock_status, ensure_ascii=False, indent=2)}\n"
+
+        # ── Few-shot examples ───────────────────────────────────────
+        examples = """## Examples
+
+### Example 1: Price Action — large gap
+Input: בלוגה אלור 750ml, בנא משקאות 150₪, Turki 229₪, savings 34%, no prior gaps
+Output:
+{"recommendation_type": "Price Action", "products": ["וודקה בלוגה אלור 750 מל"], "action": "הורד מחיר ל-155₪ (5₪ מתחת לבנא) כדי להוביל במחיר", "reasoning": "בנא is 34% cheaper (150 vs 229). Suggested price: 150*1.03=155₪ to undercut by 3%. High priority — gap >20%.", "priority": "High", "confidence": 95}
+
+### Example 2: Monitor — small gap, but recurring
+Input: ג'וני ווקר בלאק 700ml, בנא 115₪, Turki 125₪, savings 8%, gap_history=3 in 30 days
+Output:
+{"recommendation_type": "Monitor", "products": ["ג'וני ווקר בלאק לייבל 700 מל"], "action": "עקוב מקרוב — 3 פערים ב-30 יום, שקול התאמת מחיר אם נמשך", "reasoning": "Gap is only 8% but this is the 3rd gap in 30 days, suggesting a systematic pricing issue rather than a temporary sale.", "priority": "Medium", "confidence": 75}
+
+### Example 3: Ignore — likely SKU mismatch
+Input: בלוגה, פאנקו 119.9₪, Turki 319₪, savings 62%, but price_stats min=119.9 max=889.9
+Output:
+{"recommendation_type": "Ignore", "products": ["בלוגה"], "action": "אין פעולה — כנראה מוצר שונה (SKU mismatch)", "reasoning": "62% gap is suspiciously large. Price range 119.9-889.9 suggests different bottle sizes or products sharing the brand name. Verify SKU match before acting.", "priority": "Low", "confidence": 40}
+
+### Example 4: Stock Opportunity
+Input: רוסקי סטנדרט ליטר, אלכוהום 85₪, Turki 109₪, savings 22%, stock_status: אלכוהום=out_of_stock
+Output:
+{"recommendation_type": "Stock Opportunity", "products": ["וודקה רוסקי סטנדרט ליטר"], "action": "שמור מחיר 109₪ — המתחרה מחוץ למלאי, אין צורך להוריד", "reasoning": "Competitor is 22% cheaper but out of stock. No immediate threat. Hold price and monitor restock.", "priority": "Low", "confidence": 85}"""
+
+        return f"""You are a senior business strategist for 'הטורקי' (Turki), Israel's largest liquor store chain.
+Your job: analyze competitor pricing data and generate actionable recommendations for the owner (Shmulik).
 
 ## Input Data
 
@@ -311,24 +361,46 @@ Given pricing data from competitor scans, generate actionable recommendations fo
 {analyses_json}
 
 ### Scraper Health: response_rate={health.get('overall_response_rate', 'N/A')}
+{context_section}
+## Recommendation Types & Decision Criteria
 
-## Recommendation Types
-- **Price Action**: A competitor is significantly cheaper (>10%). Suggest lowering Turki's price to match or beat them.
-- **Promotion**: A competitor has a sale. Suggest a counter-promotion or marketing push.
-- **Monitor**: Price gap is small (<10%) or uncertain. Watch but don't act yet.
-- **Ignore**: No meaningful price difference. No action needed.
+1. **Price Action** — Competitor is >10% cheaper AND in stock.
+   - Suggested price: competitor_price * 0.97 (undercut by 3%) rounded to nearest 5₪.
+   - Priority: High if gap >20%, Medium if 10-20%.
+   - Confidence: 90+ for clear same-SKU gaps.
+
+2. **Promotion** — Competitor has a temporary sale (is_on_sale=true) but gap is moderate.
+   - Suggest a counter-promotion, not a permanent price cut.
+   - Priority: Medium. Confidence: 70-85.
+
+3. **Monitor** — Gap is <10%, OR gap is recurring but small, OR data is uncertain.
+   - Watch the product. Don't act yet.
+   - Priority: Low to Medium. Confidence: 60-75.
+
+4. **Ignore** — No meaningful gap, OR gap is likely a SKU/size mismatch.
+   - Red flags for SKU mismatch: gap >50%, price_stats show huge range, product name is a brand (not a specific SKU).
+   - Priority: Low. Confidence: 30-50.
+
+5. **Competitor Aggressive** — Same competitor undercuts Turki on 3+ products.
+   - Strategic response needed, not just per-product price cuts.
+   - Priority: High. Confidence: 80+.
+
+6. **Stock Opportunity** — Competitor is cheaper but out of stock or low stock.
+   - Turki can hold price — no need to match an unavailable price.
+   - Priority: Low. Confidence: 80+.
 
 ## Rules
-- Generate 1 recommendation per significant product or group of similar products.
-- Don't generate more than 8 recommendations total.
-- Be specific: include exact prices, store names, and savings percentages in the reasoning.
-- Priority: High = competitor is >20% cheaper. Medium = 10-20% cheaper. Low = <10% or monitor only.
-- Confidence: 90+ for clear price gaps. 70-89 for moderate. Below 70 for uncertain/monitor.
-- Action should be a clear, short instruction in Hebrew (Shmulik reads Hebrew).
-- Reasoning can be in English (internal team analysis).
+- Max 8 recommendations total.
+- Be specific: include exact prices, store names, savings % in reasoning.
+- Action: short Hebrew instruction for Shmulik.
+- Reasoning: English, 1-2 sentences, internal analysis.
+- Suggested prices must be realistic (undercut competitor by 3-5%, not 20%).
+- If gap_history shows 3+ gaps for same product in 30 days, escalate priority.
+- If turki_promotions includes a product, note it (don't recommend lowering price if already on promo).
+- If stock_status shows competitor "out" or "low", consider Stock Opportunity instead of Price Action.
+- If price_stats show suspiciously wide range (min/max ratio >3:1), flag possible SKU mismatch → Ignore.
 
-## Example Output
-{example}
+{examples}
 
 Return ONLY a valid JSON array of recommendation objects. No markdown, no explanation."""
 
@@ -392,7 +464,10 @@ Return ONLY a valid JSON array of recommendation objects. No markdown, no explan
 
     def _parse_recommendations(self, llm_output: List[Dict]) -> List[Recommendation]:
         """Parse raw LLM JSON output into validated Recommendation objects."""
-        valid_types = {"Price Action", "Promotion", "Monitor", "Ignore"}
+        valid_types = {
+            "Price Action", "Promotion", "Monitor", "Ignore",
+            "Competitor Aggressive", "Stock Opportunity",
+        }
         valid_priorities = {"High", "Medium", "Low"}
 
         recs = []
@@ -570,7 +645,15 @@ async def _example() -> None:
     }
 
     strategist = StrategistAgent()
-    result = strategist.generate_recommendations(mock_orchestrator_output)
+
+    # Context: gap history, stock status, Turki promotions
+    mock_context = {
+        "gap_history": {"בלוגה": 4, "ג'וני ווקר רד לייבל 700 מ\"ל": 2},
+        "turki_promotions": ["בלוגה סלבריישן 1 ליטר"],
+        "stock_status": {"Liquor Store": "low"},
+    }
+
+    result = strategist.generate_recommendations(mock_orchestrator_output, context=mock_context)
 
     print(f"\n{'═' * 60}")
     print(f"  Strategist Agent — Example Output")
