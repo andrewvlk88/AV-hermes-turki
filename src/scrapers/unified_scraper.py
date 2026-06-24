@@ -76,6 +76,8 @@ class WooCommerceAPIScraper:
         all_products = []
         seen_urls = set()
         
+        from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception_type
+        
         async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False) as client:
             for term in search_terms:
                 query_encoded = quote(term)
@@ -84,15 +86,26 @@ class WooCommerceAPIScraper:
                 
                 for url in [search_url, api_url]:
                     try:
-                        resp = await client.get(url, headers=BASE_HEADERS)
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            if isinstance(data, list) and len(data) > 0:
-                                parsed = self._parse_products(data, query)
-                                for p in parsed:
-                                    if p.product_url not in seen_urls:
-                                        seen_urls.add(p.product_url)
-                                        all_products.append(p)
+                        # Retry on network errors (server disconnect, timeout, connection)
+                        retrying = AsyncRetrying(
+                            stop=stop_after_attempt(3),
+                            wait=wait_exponential(multiplier=1, min=2, max=8),
+                            retry=retry_if_exception_type(
+                                (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)
+                            ),
+                            reraise=True,
+                        )
+                        async for attempt in retrying:
+                            with attempt:
+                                resp = await client.get(url, headers=BASE_HEADERS)
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    if isinstance(data, list) and len(data) > 0:
+                                        parsed = self._parse_products(data, query)
+                                        for p in parsed:
+                                            if p.product_url not in seen_urls:
+                                                seen_urls.add(p.product_url)
+                                                all_products.append(p)
                     except Exception as e:
                         logger.warning("WooCommerce API request failed for %s: %s", url, e)
                         continue

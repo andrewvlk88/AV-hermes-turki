@@ -70,12 +70,23 @@ async def _fetch_html(url: str, store_name: str = None) -> Optional[str]:
     except ImportError:
         pass
     
-    # Fallback: httpx
+    # Fallback: httpx with retry
+    from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception_type
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, verify=False) as client:
         try:
-            resp = await client.get(url, headers={"User-Agent": _get_ua()})
-            return resp.text if resp.status_code == 200 else None
-        except:
+            retrying = AsyncRetrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=1, min=2, max=8),
+                retry=retry_if_exception_type(
+                    (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)
+                ),
+                reraise=True,
+            )
+            async for attempt in retrying:
+                with attempt:
+                    resp = await client.get(url, headers={"User-Agent": _get_ua()})
+                    return resp.text if resp.status_code == 200 else None
+        except Exception:
             return None
 
 

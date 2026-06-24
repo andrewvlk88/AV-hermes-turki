@@ -5,6 +5,7 @@ import json
 from typing import List, Optional
 from bs4 import BeautifulSoup
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 try:
     from fake_useragent import UserAgent as _FakeUA
@@ -34,7 +35,10 @@ class HaturkiAPIScraper:
         self.store = store
     
     async def search(self, query: str) -> List[ProductPrice]:
-        """Search products via the Haturki API."""
+        """Search products via the Haturki API.
+        
+        Retries up to 3 times with exponential backoff on network errors.
+        """
         headers = {
             "User-Agent": _get_ua(),
             "Accept": "application/json",
@@ -48,12 +52,22 @@ class HaturkiAPIScraper:
         
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             try:
-                resp = await client.get(search_url, headers=headers)
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
+                # Retry on network errors (connection, timeout, server disconnect)
+                from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception_type
+                retrying = AsyncRetrying(
+                    stop=stop_after_attempt(3),
+                    wait=wait_exponential(multiplier=1, min=2, max=10),
+                    retry=retry_if_exception_type((httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)),
+                    reraise=True,
+                )
+                async for attempt in retrying:
+                    with attempt:
+                        resp = await client.get(search_url, headers=headers)
+                        if resp.status_code != 200:
+                            return []
+                        data = resp.json()
             except Exception as e:
-                print(f"  ⚠️ Haturki API error: {e}")
+                print(f"  ⚠️ Haturki API error after retries: {e}")
                 return []
         
         if data.get("status") != "success":
