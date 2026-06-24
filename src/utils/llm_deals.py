@@ -10,7 +10,7 @@ import json
 import urllib.request
 import logging
 from typing import Optional, Tuple
-from functools import lru_cache
+from src.utils.llm_cache import cache_get, cache_set
 
 logger = logging.getLogger("turk_pi.llm_deals")
 
@@ -31,7 +31,6 @@ _TIMEOUT = 15
 _MAX_TOKENS = 256
 
 
-@lru_cache(maxsize=1000)
 def llm_validate_deal(product_name: str, store_price: float, turki_price: float,
                       query: str) -> Tuple[bool, str]:
     """Ask DeepSeek to validate whether a candidate deal is real.
@@ -40,7 +39,17 @@ def llm_validate_deal(product_name: str, store_price: float, turki_price: float,
         (is_valid, reason)
         is_valid = True if this is a genuine same-product, same-volume deal
         reason = short Hebrew explanation of the decision
+
+    Cached with diskcache (SQLite-backed, survives restarts).
+    Note: Deal prices change, so we cache by product+query, not by price.
     """
+    # Disk cache check — keyed by product+query (not price, which changes)
+    cache_key = f"deal:{query}:{product_name}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.debug("Cache hit for deal validation: %r", product_name)
+        return cached[0], cached[1]
+
     if not _API_KEY:
         return True, "LLM לא זמין — מאשר לפי הנתונים הקיימים"
 
@@ -83,7 +92,10 @@ def llm_validate_deal(product_name: str, store_price: float, turki_price: float,
             if content.startswith("```"):
                 content = content.split("\n", 1)[1].rsplit("\n", 1)[0]
             result = json.loads(content)
-            return bool(result.get("valid", True)), str(result.get("reason", ""))[:200]
+            valid = bool(result.get("valid", True))
+            reason = str(result.get("reason", ""))[:200]
+            cache_set(cache_key, (valid, reason))
+            return valid, reason
     except Exception as e:
         logger.debug("LLM deal validation failed: %s", e)
         return True, "שגיאת LLM — מאשר לפי הנתונים הקיימים"

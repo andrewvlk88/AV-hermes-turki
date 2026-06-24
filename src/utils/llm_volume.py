@@ -15,7 +15,7 @@ import json
 import urllib.request
 import logging
 from typing import Optional
-from functools import lru_cache
+from src.utils.llm_cache import cache_get, cache_set
 
 logger = logging.getLogger("turk_pi.llm_volume")
 
@@ -45,7 +45,6 @@ _TIMEOUT = 15  # seconds per API call
 _MAX_TOKENS = 256  # enough for thinking + answer
 
 
-@lru_cache(maxsize=2000)
 def llm_extract_volume(product_name):
     """Ask DeepSeek V4 Flash to extract volume in ml from a product name.
 
@@ -53,8 +52,18 @@ def llm_extract_volume(product_name):
         float: Volume in ml (e.g., 1000.0, 700.0, 50.0)
         None: If LLM fails, key missing, or no volume found
 
-    Cached with lru_cache to avoid repeated API calls for same product.
+    Cached with diskcache (SQLite-backed, survives restarts).
     """
+    if not product_name or len(product_name) < 3:
+        return None
+
+    # Disk cache check
+    cache_key = f"vol:{product_name}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        logger.debug("Cache hit for volume: %r -> %s", product_name, cached)
+        return cached if cached > 0 else None
+
     if not _API_KEY:
         logger.debug("No Ollama API key, skipping LLM volume extraction")
         return None
@@ -93,11 +102,14 @@ def llm_extract_volume(product_name):
             import re
             num_match = re.search(r'\d+', text)
             if not num_match:
+                cache_set(cache_key, 0)  # Cache "no volume found" to avoid re-calling
                 return None
             vol = float(num_match.group())
             if vol <= 0:
+                cache_set(cache_key, 0)
                 return None
             logger.debug("LLM volume for %r: %s ml", product_name, vol)
+            cache_set(cache_key, vol)
             return vol
     except Exception as e:
         logger.debug("LLM volume extraction failed for %r: %s", product_name, e)
