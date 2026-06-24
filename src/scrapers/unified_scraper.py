@@ -648,6 +648,31 @@ class UnifiedScraper:
             scraper = UnifiedScraper.get_scraper(name, url)
             products = await asyncio.wait_for(scraper.search(query), timeout=store_timeout)
 
+            # ── LLM Fallback: if standard scraping returned 0 valid products ──
+            # Only triggers when all standard methods failed to extract prices.
+            # Fetches the store's search page HTML and asks LLM to find prices.
+            if not products and engine not in UnifiedScraper.API_ENGINES:
+                logger.info("LLM fallback triggered for %s — standard scraping returned 0 products", name)
+                try:
+                    from src.scrapers.html_scrapers import _fetch_html
+                    search_url = url + pattern.replace("{query}", quote(query)) if pattern else f"{url}/?s={quote(query)}"
+                    raw_html = await _fetch_html(search_url, store_name=name)
+                    if raw_html:
+                        from src.utils.llm_price_fallback import llm_extract_price
+                        fallback_price = llm_extract_price(query, raw_html, name)
+                        if fallback_price and fallback_price > 0:
+                            from src.models import ProductPrice
+                            products = [ProductPrice(
+                                product_name=query,
+                                store_name=name,
+                                store_url=url,
+                                regular_price=fallback_price,
+                                product_url=search_url,
+                            )]
+                            logger.info("LLM fallback SUCCESS for %s: %s₪", name, fallback_price)
+                except Exception as fb_err:
+                    logger.warning("LLM fallback failed for %s: %s", name, fb_err)
+
             # Apply product name cleaning + strict price validation
             cleaned_results = []
             for p in products:
