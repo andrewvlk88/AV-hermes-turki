@@ -26,6 +26,14 @@ class SearcherAgent:
         self.context = None
 
     def _load_config(self, path: str) -> dict:
+        """Load store configuration from a YAML file.
+
+        Args:
+            path: Path to the YAML config file (default: config.yaml).
+
+        Returns:
+            Parsed config dict with stores and tool settings.
+        """
         with open(path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f)
 
@@ -47,6 +55,7 @@ class SearcherAgent:
         )
 
     async def _close_browser(self):
+        """Close the Playwright browser if it is open."""
         if self.browser:
             await self.browser.close()
 

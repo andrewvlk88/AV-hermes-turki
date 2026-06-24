@@ -21,7 +21,13 @@ from src.models import Store
 
 
 def progress_callback(name, count, msg):
-    """Print a progress line for each store."""
+    """Print a progress line for each store during a scan.
+
+    Args:
+        name: Store name (Hebrew).
+        count: Number of products found (unused in output, kept for compat).
+        msg: Status message or emoji (✅, ❌, ⏱️).
+    """
     _print(f"   {name}: {msg}")
 
 
@@ -393,6 +399,17 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
 
 
 def format_telegram(report: PriceReport) -> str:
+    """Format a PriceReport as a Markdown string suitable for Telegram delivery.
+
+    Produces a concise, emoji-rich summary with the query, store response
+    count, full comparison table, and a list of deals (capped at 10).
+
+    Args:
+        report: The PriceReport to format.
+
+    Returns:
+        A Markdown-formatted string ready to send via Telegram.
+    """
     lines = ["📊 *טורקי פרייס אינטליג׳נס*"]
     lines.append(f"🔎 *{report.query}*")
     lines.append("")
@@ -521,6 +538,12 @@ def _print(*args, **kwargs):
         print(*args, **kwargs)
 
 def main():
+    """CLI entry point for Turkí Price Intelligence.
+
+    Parses command-line arguments, configures silent/JSON output modes,
+    and runs ``async_main`` for all provided queries. Supports
+    ``--agent-mode`` (implies --json --silent) for AI agent consumption.
+    """
     parser = argparse.ArgumentParser(description="טורקי פרייס אינטליג׳נס")
     parser.add_argument("queries", nargs="+", help='מוצרים: "ג\'ק דניאלס" "וודקה אבסולוט"')
     parser.add_argument("--output", "-o", default="data")

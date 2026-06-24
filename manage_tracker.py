@@ -139,6 +139,11 @@ async def run_tracker():
 
 
 def print_help():
+    """Print the CLI help/usage text in Hebrew.
+
+    Lists all available commands (list, add, remove, run, help) with
+    example invocations.
+    """
     print("""
 שימוש: python manage_tracker.py [פקודה] [פרמטרים]
 
@@ -152,6 +157,12 @@ def print_help():
 
 
 def main():
+    """CLI entry point for the tracked-products manager.
+
+    Parses sys.argv for a subcommand (list, add, remove, run, help)
+    and dispatches to the appropriate handler. Initializes the tracker
+    database on every invocation.
+    """
     init_tracker_db()
     
     if len(sys.argv) < 2:

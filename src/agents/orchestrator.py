@@ -147,6 +147,7 @@ class Plan:
     rationale: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize the Plan to a JSON-compatible dict for logging/output."""
         return {
             "intent": self.intent,
             "check_health": self.check_health,

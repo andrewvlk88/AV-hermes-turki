@@ -88,6 +88,7 @@ class Recommendation:
     confidence: int  # 0-100
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize the Recommendation to a JSON-compatible dict."""
         return {
             "recommendation_type": self.recommendation_type,
             "products": self.products,

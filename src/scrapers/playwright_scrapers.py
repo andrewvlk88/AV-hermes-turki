@@ -10,6 +10,7 @@ or require interaction (age verification, etc.).
 import asyncio
 import urllib.parse
 import re
+import errno
 from typing import List, Optional
 
 try:
@@ -48,6 +49,98 @@ except ImportError:
 
 logger = get_logger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Browser timeout configuration (SEPARATE from API-based store timeouts).
+# These govern only CloakBrowser/Playwright operations — navigation, network
+# idle waits, and the hard ceiling for a single store's browser session.
+# The API scrapers (WooCommerce/Magento/Haturki) use their own httpx timeouts
+# (see unified_scraper.STORE_TIMEOUTS for the orchestrator-level per-store cap).
+# ─────────────────────────────────────────────────────────────────────────────
+BROWSER_TIMEOUTS = {
+    "navigation": 30000,   # 30s — page.goto() default timeout
+    "networkidle": 45000,  # 45s — wait_for_load_state("networkidle")
+    "store_max": 60000,    # 60s — hard ceiling for a single browser-based store
+}
+
+# Retry configuration for CloakBrowser/Playwright operations.
+RETRY_MAX_ATTEMPTS = 3    # total attempts (1 initial + 2 retries)
+RETRY_BASE_DELAY = 2.0    # seconds — first retry waits this long
+RETRY_BACKOFF_FACTOR = 2   # multiply delay by this each attempt (2x exponential)
+
+
+def _is_epipe_error(exc: BaseException) -> bool:
+    """Return True if *exc* is an EPIPE / BrokenPipeError (the Node.js
+    Playwright driver raises these when the IPC pipe to the browser process
+    breaks under heavy load).
+
+    The Node driver surfaces the raw errno via a string message like
+    ``Error: write EPIPE at PipeTransport.send (...)`` so we also match on
+    the textual form in addition to the Python-level errno.
+    """
+    # Python BrokenPipeError (raised by asyncio transports / subprocess pipes)
+    if isinstance(exc, BrokenPipeError):
+        return True
+    # errno.EPIPE via OSError subclasses (ConnectionError, OSError, …)
+    if isinstance(exc, OSError) and exc.errno in (errno.EPIPE, errno.ECONNRESET):
+        return True
+    # String-form EPIPE coming from the Node.js Playwright driver
+    msg = str(exc)
+    if "EPIPE" in msg or "PipeTransport" in msg or "write EPIPE" in msg:
+        return True
+    return False
+
+
+def _is_browser_retriable(exc: BaseException) -> bool:
+    """Decide whether *exc* is worth retrying for browser operations.
+
+    Retries help for transient pipe breaks, driver crashes, and timeouts;
+    permanent errors (e.g. invalid selector) are left for the caller.
+    """
+    # EPIPE / BrokenPipeError family — the primary target of this module.
+    if _is_epipe_error(exc):
+        return True
+    # Playwright's own TimeoutError (navigation/load state timeouts)
+    if PwTimeout is not None and isinstance(exc, PwTimeout):
+        return True
+    # asyncio.TimeoutError raised by asyncio.wait_for around browser calls
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
+    # Generic ConnectionError covers reset/aborted pipe variants
+    if isinstance(exc, ConnectionError):
+        return True
+    return False
+
+
+async def _browser_retry(coro_factory, store_name: str, op_desc: str):
+    """Run a browser operation with exponential backoff retry.
+
+    ``coro_factory`` is a zero-argument callable returning a fresh coroutine
+    each attempt (so retries actually re-execute the work). Retries up to
+    ``RETRY_MAX_ATTEMPTS`` times, sleeping ``RETRY_BASE_DELAY *
+    RETRY_BACKOFF_FACTOR**attempt`` seconds between attempts.
+
+    Only errors classified by :func:`_is_browser_retriable` are retried;
+    everything else re-raises immediately so callers see real bugs.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return await coro_factory()
+        except Exception as exc:  # noqa: BLE001 — we classify below
+            last_exc = exc
+            if not _is_browser_retriable(exc) or attempt == RETRY_MAX_ATTEMPTS:
+                # Non-retriable, or out of attempts — propagate.
+                raise
+            delay = RETRY_BASE_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1))
+            logger.warning(
+                "[%s] browser op %r failed (attempt %d/%d): %s — retrying in %.0fs",
+                store_name, op_desc, attempt, RETRY_MAX_ATTEMPTS, exc, delay,
+            )
+            await asyncio.sleep(delay)
+    # Should be unreachable, but keep mypy happy.
+    if last_exc is not None:  # pragma: no cover
+        raise last_exc
+
 
 class PlaywrightEngine:
     """Shared browser pool — prefers CloakBrowser, falls back to Playwright."""
@@ -59,31 +152,58 @@ class PlaywrightEngine:
     
     @classmethod
     async def get_browser(cls):
-        """Get or create shared browser instance (Playwright fallback only)."""
+        """Get or create shared browser instance (Playwright fallback only).
+
+        Wrapped in :func:`_browser_retry` so transient EPIPE / BrokenPipeError
+        from the Node.js driver are retried with exponential backoff.
+        """
         if cls._browser and cls._browser.is_connected():
             return cls._browser
-        
-        if not cls._playwright:
-            cls._playwright = await async_playwright().start()
-        
-        cls._browser = await cls._playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
-        return cls._browser
+
+        async def _launch():
+            if not cls._playwright:
+                cls._playwright = await async_playwright().start()
+            cls._browser = await cls._playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                ]
+            )
+            return cls._browser
+
+        return await _browser_retry(_launch, "PlaywrightEngine", "get_browser")
     
     @classmethod
     async def close(cls):
-        """Clean up browser."""
+        """Clean up browser — EPIPE-safe.
+
+        During heavy scraping the IPC pipe to the browser process can break,
+        so we swallow EPIPE/BrokenPipeError here to avoid masking the real
+        error that triggered cleanup.
+        """
         if cls._browser:
-            await cls._browser.close()
+            try:
+                await cls._browser.close()
+            except (BrokenPipeError, ConnectionError) as e:
+                logger.warning("EPIPE while closing browser (ignored): %s", e)
+            except Exception as e:
+                if _is_epipe_error(e):
+                    logger.warning("EPIPE while closing browser (ignored): %s", e)
+                else:
+                    raise
             cls._browser = None
         if cls._playwright:
-            await cls._playwright.stop()
+            try:
+                await cls._playwright.stop()
+            except (BrokenPipeError, ConnectionError) as e:
+                logger.warning("EPIPE while stopping playwright (ignored): %s", e)
+            except Exception as e:
+                if _is_epipe_error(e):
+                    logger.warning("EPIPE while stopping playwright (ignored): %s", e)
+                else:
+                    raise
             cls._playwright = None
 
 
@@ -122,13 +242,19 @@ async def _create_cloak_context(store_name: str = None):
     
     CloakBrowser patches 58 fingerprints at the C++ source level —
     navigator.webdriver, plugins, chrome object, TLS fingerprint, etc.
+
+    Retries on EPIPE / BrokenPipeError via :func:`_browser_retry`.
     """
-    browser = await launch_async(
-        headless=True,
-        locale="he-IL",
-        timezone="Asia/Jerusalem",
-        humanize=False,
-        stealth_args=True,
+    async def _launch():
+        return await launch_async(
+            headless=True,
+            locale="he-IL",
+            timezone="Asia/Jerusalem",
+            humanize=False,
+            stealth_args=True,
+        )
+    browser = await _browser_retry(
+        _launch, store_name or "CloakBrowser", "launch_async"
     )
     # Return the browser — caller uses browser.new_page() / browser.new_context()
     return browser
@@ -144,41 +270,64 @@ class GenericPlaywrightScraper:
     def __init__(self, store: Store, config: dict = None):
         self.store = store
         self.config = config or {}
-        # CloakBrowser is slower to render — give more timeout
-        base_timeout = self.config.get("timeout", 15000)
+        # CloakBrowser is slower to render — give more timeout.
+        # Use BROWSER_TIMEOUTS["navigation"] as the floor so even fast
+        # stores get at least the 30s navigation timeout.
+        base_timeout = self.config.get("timeout", BROWSER_TIMEOUTS["navigation"])
         if CLOAK_AVAILABLE:
-            base_timeout = max(base_timeout, 30000)
+            base_timeout = max(base_timeout, BROWSER_TIMEOUTS["navigation"])
         self.timeout = base_timeout
+        # Separate timeouts for distinct browser phases (see BROWSER_TIMEOUTS).
+        self.navigation_timeout = BROWSER_TIMEOUTS["navigation"]
+        self.networkidle_timeout = BROWSER_TIMEOUTS["networkidle"]
+        self.store_max_timeout = BROWSER_TIMEOUTS["store_max"]
     
     async def search(self, query: str) -> List[ProductPrice]:
-        """Search using CloakBrowser (preferred) or Playwright fallback."""
+        """Search using CloakBrowser (preferred) or Playwright fallback.
+
+        The entire search — context creation, page navigation, content
+        extraction — is wrapped in an outer ``try/finally`` that guarantees
+        the browser context is closed even on EPIPE/BrokenPipeError.
+        Each page operation is retried via :func:`_browser_retry` (3 attempts,
+        exponential backoff 2s → 4s).
+        """
         search_patterns = self.config.get(
             "search_patterns",
             ["/Search/?q={query}", "/?s={query}&post_type=product", 
              "/search/result/?q={query}", "/catalogsearch/result/?q={query}"]
         )
         
-        # Use CloakBrowser if available, otherwise fall back to Playwright
-        if CLOAK_AVAILABLE:
-            context = await _create_cloak_context(store_name=self.store.name)
-        else:
-            browser = await PlaywrightEngine.get_browser()
-            context = await browser.launch_persistent_context(
-                user_data_dir="./data/playwright_sessions",
-                user_agent=_get_ua(),
-                locale="he-IL",
-                timezone_id="Asia/Jerusalem",
-                viewport={"width": 1920, "height": 1080},
-            )
-        
+        context = None
         products = []
         try:
+            # Use CloakBrowser if available, otherwise fall back to Playwright.
+            # Both paths are retried on EPIPE via _browser_retry.
+            if CLOAK_AVAILABLE:
+                context = await _create_cloak_context(store_name=self.store.name)
+            else:
+                browser = await PlaywrightEngine.get_browser()
+                context = await browser.launch_persistent_context(
+                    user_data_dir="./data/playwright_sessions",
+                    user_agent=_get_ua(),
+                    locale="he-IL",
+                    timezone_id="Asia/Jerusalem",
+                    viewport={"width": 1920, "height": 1080},
+                )
+
             for pattern in search_patterns:
                 search_url = self.store.url.rstrip("/") + pattern.replace("{query}", urllib.parse.quote(query))
                 
                 page = await context.new_page()
                 try:
-                    await page.goto(search_url, wait_until="domcontentloaded", timeout=self.timeout)
+                    # ── Navigation (retried on EPIPE) ────────────────────────
+                    async def _navigate():
+                        await page.goto(
+                            search_url,
+                            wait_until="domcontentloaded",
+                            timeout=self.navigation_timeout,
+                        )
+                    await _browser_retry(_navigate, self.store.name, f"goto {search_url}")
+                    
                     await asyncio.sleep(2)
                     logger.info("Scraping %s → %s", self.store.name, search_url)
                     
@@ -219,28 +368,54 @@ class GenericPlaywrightScraper:
                         except Exception as e:
                             logger.warning("Age verification handling failed: %s", e)
                     
-                    # Wait a bit more for lazy content
-                    # Don't use networkidle — heavy sites (Magento) never reach it
+                    # Wait a bit more for lazy content.
+                    # Don't use networkidle — heavy sites (Magento) never reach it.
                     try:
-                        await page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
+                        await page.wait_for_load_state("domcontentloaded", timeout=self.navigation_timeout)
                     except Exception:
                         pass
                     # Magento sites (Paneco, Importer) load search results via AJAX
                     # — they need more time to replace initial placeholder products
                     await asyncio.sleep(6)
                     
-                    html = await page.content()
+                    # ── Content extraction (retried on EPIPE) ─────────────────
+                    async def _get_content():
+                        return await page.content()
+                    html = await _browser_retry(_get_content, self.store.name, "page.content")
                     products = self._extract_products(html, query)
                     
                     if products:
                         return products
                         
                 except Exception as e:
-                    logger.warning("Page navigation/processing failed for %s: %s", search_url, e)
+                    if _is_epipe_error(e):
+                        logger.error("EPIPE during page ops for %s → %s: %s", self.store.name, search_url, e)
+                    else:
+                        logger.warning("Page navigation/processing failed for %s: %s", search_url, e)
                 finally:
-                    await page.close()
+                    # Always close the page, even on error — swallow EPIPE
+                    # so cleanup never masks the original failure.
+                    try:
+                        await page.close()
+                    except (BrokenPipeError, ConnectionError) as close_err:
+                        logger.warning("EPIPE while closing page (ignored): %s", close_err)
+                    except Exception as close_err:
+                        if _is_epipe_error(close_err):
+                            logger.warning("EPIPE while closing page (ignored): %s", close_err)
+                        else:
+                            logger.warning("Failed to close page: %s", close_err)
         finally:
-            await context.close()
+            # ── Context cleanup — guaranteed even on EPIPE ──────────────────
+            if context is not None:
+                try:
+                    await context.close()
+                except (BrokenPipeError, ConnectionError) as e:
+                    logger.warning("EPIPE while closing context (ignored): %s", e)
+                except Exception as e:
+                    if _is_epipe_error(e):
+                        logger.warning("EPIPE while closing context (ignored): %s", e)
+                    else:
+                        logger.warning("Failed to close context: %s", e)
         
         return products
     

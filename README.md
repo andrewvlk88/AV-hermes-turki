@@ -464,3 +464,43 @@ for rec in recs["recommendations"]:
 ## 📜 License
 
 Personal project — Andrew Volkov (@andrewvlk88)
+
+---
+
+## 🔧 Playwright Stability Improvements
+
+שיפורי יציבות למנוע ה-CloakBrowser/Playwright למניעת קריסות בזמן סריקה כבדה.
+
+### הבעיה
+
+בזמן סריקה מקבילית של מספר חנויות, מנוע ה-Node.js של Playwright יכול להרים שגיאת `EPIPE` (`Error: write EPIPE at PipeTransport.send`) כשה-pipe בין Python לתהליך Chromium נשבר. השגיאה הייתה מפילה את הסקראפר בלי retry ובלי ניקוי context.
+
+### מה שונה
+
+1. **EPIPE Error Handling** (`playwright_scrapers.py`):
+   - פונקציית `_is_epipe_error()` מזהה EPIPE/BrokenPipeError בשלוש צורות: Python `BrokenPipeError`, `OSError` עם `errno.EPIPE`/`ECONNRESET`, והודעת string מה-Node driver (`"EPIPE"`, `"PipeTransport"`).
+   - כל פעולות הדפדפן (launch, goto, page.content, close) עטופות ב-try/except שתופס EPIPE ומנקה context גם כשה-pipe נשבר.
+
+2. **Retry עם Exponential Backoff** (`playwright_scrapers.py`):
+   - פונקציית `_browser_retry()` — 3 ניסיונות, delay בסיס 2s, factor 2x (2s → 4s → 8s).
+   - משמש לכל פעולות CloakBrowser/Playwright: `launch_async`, `chromium.launch`, `page.goto`, `page.content`.
+   - רק שגיאות retriable (EPIPE, TimeoutError, ConnectionError) מנסות שוב — שגיאות logic (selector, ValueError) עולות מייד.
+
+3. **Timeouts נפרדים לדפדפן** (`playwright_scrapers.py` + `unified_scraper.py`):
+   - `BROWSER_TIMEOUTS = {"navigation": 30000, "networkidle": 45000, "store_max": 60000}` (ms).
+   - 30s ל-navigation, 45s ל-networkidle, 60s ceiling לכל חנות.
+   - **נפרד מקומplet מ-API timeouts** — ה-`STORE_TIMEOUTS` ב-unified_scraper (90-120s) נשארו ללא שינוי לחנויות API.
+   - `UnifiedScraper.BROWSER_TIMEOUT` dict משקף את אותם ערכים לתצורה מרכזית.
+
+4. **Cleanup מובטח של Browser Contexts** (`playwright_scrapers.py`):
+   - `GenericPlaywrightScraper.search()` עטוף ב-`try/finally` חיצוני — ה-context נסגר תמיד, גם ב-EPIPE.
+   - `page.close()` ו-`context.close()` עטופים ב-try/except שלא מפיל את השגיאה המקורית.
+   - `PlaywrightEngine.close()` גם הוא EPIPE-safe.
+
+### קבצים ששונו
+
+| קובץ | שינוי |
+|------|------|
+| `src/scrapers/playwright_scrapers.py` | EPIPE handling, retry logic, browser timeouts, context cleanup |
+| `src/scrapers/unified_scraper.py` | `BROWSER_TIMEOUT` dict (timeout config only, no concurrency changes) |
+| `README.md` | סקציית תיעוד זו |
