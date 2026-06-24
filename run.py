@@ -165,13 +165,21 @@ def find_turki_match(name_key: str, turki_lookup: dict) -> dict:
             except (ValueError, IndexError):
                 pass
             
-            # Only match if volumes are similar
-            if tk_vol == 0 or abs(tk_vol - target_vol) >= 50:
+            # Only match if volumes are compatible
+            # - Both known: must be within ±50ml
+            # - Turki unknown (tk_vol==0): allow if names match (Turki often omits volume)
+            # - Product unknown (target_vol==0): reject (can't verify)
+            if tk_vol == 0:
+                pass  # Turki didn't specify volume — allow name-based match
+            elif abs(tk_vol - target_vol) >= 50:
                 continue
             
             # Product name words must be a subset of turki name words
-            product_words = set(name_part.split())
-            turki_words = set(tk_name.split())
+            # Strip volume/size tokens — they're already matched via volume check above
+            _VOLUME_TOKENS = {"מ\"ל", "ml", "ליטר", "liter", "ל", "750", "700", "1000",
+                              "500", "200", "50", "100", "175", "350", "375", "1l", "1L"}
+            product_words = set(name_part.split()) - _VOLUME_TOKENS
+            turki_words = set(tk_name.split()) - _VOLUME_TOKENS
             if product_words.issubset(turki_words):
                 return tv
     
