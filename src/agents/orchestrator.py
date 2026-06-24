@@ -623,9 +623,13 @@ class OrchestratorAgent:
         url = self._LLM_BASE_URL + "/chat/completions"
         payload = _json.dumps({
             "model": self._LLM_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {"role": "system", "content": "You are a JSON-only planning agent. Always respond with valid JSON. Never add prose, markdown, or explanations."},
+                {"role": "user", "content": prompt},
+            ],
             "temperature": 0,
             "max_tokens": self._LLM_MAX_TOKENS,
+            "response_format": {"type": "json_object"},
         }).encode()
 
         req = urllib.request.Request(
@@ -643,11 +647,10 @@ class OrchestratorAgent:
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 content = content.strip()
 
-                # Strip markdown code fences if present
-                if content.startswith("```"):
-                    content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-
-                parsed = _json.loads(content)
+                parsed = self._extract_json(content)
+                if parsed is None:
+                    logger.warning("LLM planning: could not extract JSON from response: %s", content[:200])
+                    return None
 
                 # Validate and build Plan
                 plan = Plan(
@@ -676,6 +679,117 @@ class OrchestratorAgent:
         except Exception as exc:
             logger.warning("LLM planning failed: %s", exc)
             return None
+
+    @staticmethod
+    def _extract_json(content: str) -> Optional[Dict[str, Any]]:
+        """Extract and parse JSON from LLM response, handling common issues.
+
+        Tries multiple strategies:
+        1. Direct json.loads (fast path — clean JSON)
+        2. Strip markdown code fences (```json ... ```)
+        3. Find first { ... } block via regex (LLM added prose around JSON)
+        4. Repair common issues (trailing commas, single quotes)
+
+        Returns parsed dict or None if all strategies fail.
+        """
+        import json as _json
+        import re
+
+        if not content:
+            return None
+
+        # Strategy 1: direct parse
+        try:
+            return _json.loads(content)
+        except _json.JSONDecodeError:
+            pass
+
+        # Strategy 2: strip markdown code fences
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            # Remove first line (```json or ```) and last ```
+            lines = stripped.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            stripped = "\n".join(lines).strip()
+            try:
+                return _json.loads(stripped)
+            except _json.JSONDecodeError:
+                pass
+
+        # Strategy 3: find first { ... } block (greedy, handles nested braces)
+        # Match from first { to last } — works even if LLM adds prose before/after
+        first_brace = stripped.find("{")
+        last_brace = stripped.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            json_candidate = stripped[first_brace:last_brace + 1]
+            try:
+                return _json.loads(json_candidate)
+            except _json.JSONDecodeError:
+                # Strategy 4: repair common issues
+                repaired = OrchestratorAgent._repair_json(json_candidate)
+                if repaired:
+                    try:
+                        return _json.loads(repaired)
+                    except _json.JSONDecodeError:
+                        pass
+
+        return None
+
+    @staticmethod
+    def _repair_json(text: str) -> Optional[str]:
+        """Attempt to repair common JSON issues from LLM output.
+
+        Fixes:
+        - Trailing commas before } or ]
+        - Single quotes → double quotes
+        - Unescaped newlines inside strings
+        """
+        import re
+
+        if not text:
+            return None
+
+        repaired = text
+
+        # Fix trailing commas: ,} or ,] → } or ]
+        repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+
+        # Fix single quotes → double quotes (only for keys/values, not inside strings)
+        # Simple approach: replace ' with " when used as delimiters
+        repaired = re.sub(r"(?<!\\)'", '"', repaired)
+
+        # Fix unescaped newlines inside string values
+        # This is tricky — only fix \n that's clearly inside a value
+        # Safe approach: replace literal newlines with \\n inside quotes
+        def escape_newlines_in_strings(s: str) -> str:
+            result = []
+            in_string = False
+            escape = False
+            for ch in s:
+                if escape:
+                    result.append(ch)
+                    escape = False
+                    continue
+                if ch == '\\':
+                    result.append(ch)
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    result.append(ch)
+                    continue
+                if ch == '\n' and in_string:
+                    result.append('\\n')
+                    continue
+                result.append(ch)
+            return ''.join(result)
+
+        repaired = escape_newlines_in_strings(repaired)
+
+        return repaired
 
     def _keyword_plan(self, goal: str, c: Constraints) -> Plan:
         """Keyword-based fallback planning (original logic).
