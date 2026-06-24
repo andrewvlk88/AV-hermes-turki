@@ -648,13 +648,27 @@ class UnifiedScraper:
             scraper = UnifiedScraper.get_scraper(name, url)
             products = await asyncio.wait_for(scraper.search(query), timeout=store_timeout)
 
-            # Apply product name cleaning
+            # Apply product name cleaning + strict price validation
             cleaned_results = []
             for p in products:
                 p.product_name = clean_product_name(p.product_name)
                 best_price = p.sale_price or p.regular_price
-                if best_price and not is_bogus_price(best_price, p.product_name):
-                    cleaned_results.append(p)
+                
+                # Strict price validation — never save invalid prices
+                if best_price is None:
+                    logger.warning("Skipping %s from %s: price is None", p.product_name, name)
+                    continue
+                if not isinstance(best_price, (int, float)):
+                    logger.warning("Skipping %s from %s: price not a number (%r)", p.product_name, name, best_price)
+                    continue
+                if best_price <= 0:
+                    logger.warning("Skipping %s from %s: price is %s (zero/negative)", p.product_name, name, best_price)
+                    continue
+                if is_bogus_price(best_price, p.product_name):
+                    logger.warning("Skipping %s from %s: bogus price %s₪", p.product_name, name, best_price)
+                    continue
+                
+                cleaned_results.append(p)
             products = cleaned_results
 
             # Filter out 200ml/500ml and accessory/bundle products before saving
@@ -663,8 +677,12 @@ class UnifiedScraper:
                 if is_relevant_volume_by_name(p.product_name) and not is_accessory(p.product_name)
             ]
 
+            # Only save if we have valid products — never overwrite with empty/failed scrape
             if run_id:
-                save_store_result(run_id, query, name, products)
+                if products:
+                    save_store_result(run_id, query, name, products)
+                else:
+                    logger.warning("No valid products to save for %s — skipping DB write (preserving existing data)", name)
 
             if progress_callback:
                 progress_callback(name, len(products), "✅")
