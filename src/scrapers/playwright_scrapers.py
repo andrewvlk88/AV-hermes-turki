@@ -300,8 +300,6 @@ class GenericPlaywrightScraper:
         self.timeout = base_timeout
         # Separate timeouts for distinct browser phases (see BROWSER_TIMEOUTS).
         self.navigation_timeout = BROWSER_TIMEOUTS["navigation"]
-        self.networkidle_timeout = BROWSER_TIMEOUTS["networkidle"]
-        self.store_max_timeout = BROWSER_TIMEOUTS["store_max"]
     
     async def search(self, query: str) -> List[ProductPrice]:
         """Search using CloakBrowser (preferred) or Playwright fallback.

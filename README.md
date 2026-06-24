@@ -488,9 +488,8 @@ Personal project — Andrew Volkov (@andrewvlk88)
 
 3. **Timeouts נפרדים לדפדפן** (`playwright_scrapers.py` + `unified_scraper.py`):
    - `BROWSER_TIMEOUTS = {"navigation": 30000, "networkidle": 45000, "store_max": 60000}` (ms).
-   - 30s ל-navigation, 45s ל-networkidle, 60s ceiling לכל חנות.
+   - 30s ל-navigation (page.goto/domcontentloaded).
    - **נפרד מקומplet מ-API timeouts** — ה-`STORE_TIMEOUTS` ב-unified_scraper (90-120s) נשארו ללא שינוי לחנויות API.
-   - `UnifiedScraper.BROWSER_TIMEOUT` dict משקף את אותם ערכים לתצורה מרכזית.
 
 4. **Cleanup מובטח של Browser Contexts** (`playwright_scrapers.py`):
    - `GenericPlaywrightScraper.search()` עטוף ב-`try/finally` חיצוני — ה-context נסגר תמיד, גם ב-EPIPE.
@@ -502,5 +501,5 @@ Personal project — Andrew Volkov (@andrewvlk88)
 | קובץ | שינוי |
 |------|------|
 | `src/scrapers/playwright_scrapers.py` | EPIPE handling, retry logic, browser timeouts, context cleanup |
-| `src/scrapers/unified_scraper.py` | `BROWSER_TIMEOUT` dict (timeout config only, no concurrency changes) |
+| `src/scrapers/unified_scraper.py` | Orchestration, concurrency control, per-store hard timeout (no browser timeout mirror) |
 | `README.md` | סקציית תיעוד זו |

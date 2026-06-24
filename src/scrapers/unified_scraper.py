@@ -463,19 +463,6 @@ class UnifiedScraper:
         "Wine & More": 120,
     }
     
-    # Browser-level timeouts (milliseconds) — SEPARATE from the API-level
-    # STORE_TIMEOUTS above. These govern only CloakBrowser/Playwright
-    # operations (page.goto, wait_for_load_state, page.content) inside
-    # playwright_scrapers.py.  See BROWSER_TIMEOUTS in that module for the
-    # authoritative source; this dict mirrors it here so the orchestrator
-    # has a single configuration surface and can adjust browser timeouts
-    # without touching the scraper internals.
-    BROWSER_TIMEOUT = {
-        "navigation": 30000,   # 30s — page.goto() / domcontentloaded wait
-        "networkidle": 45000,  # 45s — wait_for_load_state("networkidle")
-        "store_max": 60000,    # 60s — hard ceiling for a single browser store
-    }
-
     # --- Concurrency control -------------------------------------------------
     # Maximum concurrent browser-based scrapers (CloakBrowser/Playwright).
     # Each spawns a full Chromium process — too many in parallel causes memory
