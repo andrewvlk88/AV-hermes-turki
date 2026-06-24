@@ -445,6 +445,27 @@ class UnifiedScraper:
         "בית המשקאות של אביב": 120,
         "Wine & More": 120,
     }
+
+    # --- Concurrency control -------------------------------------------------
+    # Maximum concurrent browser-based scrapers (CloakBrowser/Playwright).
+    # Each spawns a full Chromium process — too many in parallel causes memory
+    # exhaustion and session-file locks. 3 is the sweet spot on a 2-4 vCPU box.
+    MAX_BROWSER_CONCURRENCY = 3
+
+    # Engines that are pure HTTP/REST API calls — lightweight, no browser.
+    # These run concurrently WITHOUT any semaphore limiting.
+    API_ENGINES = {"haturki_api", "woocommerce", "magento"}
+
+    @staticmethod
+    def _is_browser_engine(engine: str) -> bool:
+        """Return True if the engine spawns a browser (CloakBrowser/Playwright).
+
+        Browser engines include: playwright*, magento_html, sar, prodbox_*,
+        and the generic HTMLFallbackScraper (which uses CloakBrowser via
+        _fetch_html). API engines (woocommerce, magento, haturki_api) are
+        pure HTTP and do not need limiting.
+        """
+        return engine not in UnifiedScraper.API_ENGINES
     
     # Store configurations
     # Auto-generated from config.yaml — single source of truth
@@ -522,77 +543,160 @@ class UnifiedScraper:
             return HTMLFallbackScraper(store, search_pattern)
     
     @staticmethod
-    async def search_all(query: str, progress_callback=None, run_id: str = None) -> dict:
-        """Search ALL stores SEQUENTIALLY with per-store hard timeout.
+    async def _scrape_one_store(
+        name: str,
+        url: str,
+        engine: str,
+        pattern: str,
+        query: str,
+        progress_callback,
+        run_id: str,
+        browser_semaphore: asyncio.Semaphore,
+    ) -> tuple[str, list]:
+        """Scrape a single store. Returns (name, products).
 
-        Each store is wrapped in asyncio.wait_for() so a single hanging site
-        cannot stall the whole watchdog run. Results are saved to SQLite
-        immediately, so partial progress survives failures.
+        For browser-based engines, acquires a semaphore slot before launching
+        the browser and releases it in a finally block — even on error.
         """
         from src.storage.sqlite_store import (
             save_store_result, mark_store_error, mark_store_running
         )
 
-        all_prices = {}
-        total_stores = len([c for c in UnifiedScraper.STORE_CONFIGS if c[2] != "haturki_api"])
-        completed = 0
+        store = Store(name=name, url=url, search_path=pattern or "", type="static")
+        store_timeout = UnifiedScraper.STORE_TIMEOUTS.get(
+            name, UnifiedScraper.DEFAULT_STORE_TIMEOUT
+        )
+
+        is_browser = UnifiedScraper._is_browser_engine(engine)
+
+        # --- Browser semaphore ------------------------------------------------
+        if is_browser:
+            logger.info(
+                "Browser scraper %s waiting for semaphore slot (concurrency=%d)",
+                name, browser_semaphore._value,
+            )
+            await browser_semaphore.acquire()
+            logger.info("Browser scraper %s acquired semaphore slot", name)
+
+        products = []
+        error_msg = None
+        start_ts = asyncio.get_event_loop().time()
+
+        try:
+            if run_id:
+                mark_store_running(run_id, query, name)
+
+            scraper = UnifiedScraper.get_scraper(name, url)
+            products = await asyncio.wait_for(scraper.search(query), timeout=store_timeout)
+
+            # Apply product name cleaning
+            cleaned_results = []
+            for p in products:
+                p.product_name = clean_product_name(p.product_name)
+                best_price = p.sale_price or p.regular_price
+                if best_price and not is_bogus_price(best_price, p.product_name):
+                    cleaned_results.append(p)
+            products = cleaned_results
+
+            # Filter out 200ml/500ml and accessory/bundle products before saving
+            products = [
+                p for p in products
+                if is_relevant_volume_by_name(p.product_name) and not is_accessory(p.product_name)
+            ]
+
+            if run_id:
+                save_store_result(run_id, query, name, products)
+
+            if progress_callback:
+                progress_callback(name, len(products), "✅")
+
+        except asyncio.TimeoutError:
+            error_msg = f"timeout after {store_timeout}s"
+            logger.error("Store %s timed out after %ds for query %r", name, store_timeout, query)
+            if progress_callback:
+                progress_callback(name, 0, f"⏱️ timeout {store_timeout}s")
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {e}"
+            logger.exception("Store %s failed for query %r", name, query)
+            if progress_callback:
+                progress_callback(name, 0, f"❌ {type(e).__name__}")
+        finally:
+            # Always release the browser semaphore (if acquired) — even on error
+            if is_browser:
+                browser_semaphore.release()
+                logger.info("Browser scraper %s released semaphore slot", name)
+
+            elapsed = asyncio.get_event_loop().time() - start_ts
+            if run_id and error_msg:
+                mark_store_error(run_id, query, name, error_msg)
+            logger.info(
+                "%s done in %.1fs | products=%d | error=%s | engine=%s | browser=%s",
+                name, elapsed, len(products), error_msg or "none", engine, is_browser,
+            )
+
+        return name, products
+
+    @staticmethod
+    async def search_all(query: str, progress_callback=None, run_id: str = None) -> dict:
+        """Search ALL stores with smart concurrency control.
+
+        Strategy:
+        - API-based stores (WooCommerce, Magento, Turki API) run concurrently
+          with NO limit — they're lightweight HTTP calls.
+        - Browser-based stores (CloakBrowser/Playwright) run with a concurrency
+          limit (MAX_BROWSER_CONCURRENCY, default 3) enforced via asyncio.Semaphore.
+          Each browser scraper must acquire a slot before launching Chromium and
+          releases it when done — even on error.
+
+        Both groups are dispatched simultaneously. API stores finish fast and
+        browser stores trickle through the semaphore. Each store is wrapped in
+        asyncio.wait_for() so a single hanging site cannot stall the whole run.
+        Results are saved to SQLite immediately, so partial progress survives failures.
+        """
+        # Split stores into API group (unlimited) and browser group (semaphore-limited)
+        api_tasks = []
+        browser_tasks = []
 
         for name, url, engine, pattern in UnifiedScraper.STORE_CONFIGS:
             # Haturki excluded (already handled separately in run.py)
             if engine == "haturki_api":
                 continue
 
-            store = Store(name=name, url=url, search_path=pattern or "", type="static")
-            store_timeout = UnifiedScraper.STORE_TIMEOUTS.get(name, UnifiedScraper.DEFAULT_STORE_TIMEOUT)
+            # Defer semaphore creation to here so we get a fresh one per run
+            if UnifiedScraper._is_browser_engine(engine):
+                browser_tasks.append((name, url, engine, pattern))
+            else:
+                api_tasks.append((name, url, engine, pattern))
 
-            if run_id:
-                mark_store_running(run_id, query, name)
+        total_stores = len(api_tasks) + len(browser_tasks)
+        logger.info(
+            "search_all: %d stores | API(unlimited)=%d | Browser(semaphore=%d)=%d",
+            total_stores, len(api_tasks), UnifiedScraper.MAX_BROWSER_CONCURRENCY, len(browser_tasks),
+        )
 
-            start_ts = asyncio.get_event_loop().time()
-            products = []
-            error_msg = None
-            try:
-                scraper = UnifiedScraper.get_scraper(name, url)
-                products = await asyncio.wait_for(scraper.search(query), timeout=store_timeout)
+        browser_semaphore = asyncio.Semaphore(UnifiedScraper.MAX_BROWSER_CONCURRENCY)
 
-                # Apply product name cleaning
-                cleaned_results = []
-                for p in products:
-                    p.product_name = clean_product_name(p.product_name)
-                    best_price = p.sale_price or p.regular_price
-                    if best_price and not is_bogus_price(best_price, p.product_name):
-                        cleaned_results.append(p)
-                products = cleaned_results
+        # Build coroutine objects — all dispatched together via asyncio.gather
+        coros = []
+        for name, url, engine, pattern in api_tasks:
+            coros.append(UnifiedScraper._scrape_one_store(
+                name, url, engine, pattern, query,
+                progress_callback, run_id, browser_semaphore,
+            ))
+        for name, url, engine, pattern in browser_tasks:
+            coros.append(UnifiedScraper._scrape_one_store(
+                name, url, engine, pattern, query,
+                progress_callback, run_id, browser_semaphore,
+            ))
 
-                # Filter out 200ml/500ml and accessory/bundle products before saving
-                products = [
-                    p for p in products
-                    if is_relevant_volume_by_name(p.product_name) and not is_accessory(p.product_name)
-                ]
+        # Gather all results. return_exceptions=False means an unexpected error
+        # in _scrape_one_store would propagate — but _scrape_one_store catches
+        # all exceptions internally and returns (name, []), so this is safe.
+        results = await asyncio.gather(*coros)
 
-                if run_id:
-                    save_store_result(run_id, query, name, products)
+        all_prices = {}
+        for name, products in results:
+            all_prices[name] = products
 
-                if progress_callback:
-                    progress_callback(name, len(products), "✅")
-
-            except asyncio.TimeoutError:
-                error_msg = f"timeout after {store_timeout}s"
-                logger.error("Store %s timed out after %ds for query %r", name, store_timeout, query)
-                if progress_callback:
-                    progress_callback(name, 0, f"⏱️ timeout {store_timeout}s")
-            except Exception as e:
-                error_msg = f"{type(e).__name__}: {e}"
-                logger.exception("Store %s failed for query %r", name, query)
-                if progress_callback:
-                    progress_callback(name, 0, f"❌ {type(e).__name__}")
-            finally:
-                elapsed = asyncio.get_event_loop().time() - start_ts
-                completed += 1
-                all_prices[name] = products
-                if run_id and error_msg:
-                    mark_store_error(run_id, query, name, error_msg)
-                logger.info("[%d/%d] %s done in %.1fs | products=%d | error=%s",
-                            completed, total_stores, name, elapsed, len(products), error_msg or "none")
-
+        logger.info("search_all complete: %d/%d stores returned data", len(all_prices), total_stores)
         return all_prices

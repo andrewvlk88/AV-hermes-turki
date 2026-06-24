@@ -169,15 +169,70 @@ streamlit run dashboard.py --server.port 5053
 
 ---
 
-## 🕷️ ארכיטקטורת הסקראפינג (20 חנויות)
+## 🕷️ ארכיטקטורת הסקראפינג — שני מסלולים (20 חנויות)
 
-| רמת סריקה | מנוע טכנולוגי | חנויות נסרקות | יתרונות ושיקולים |
-|-----------|---------------|---------------|------------------|
-| **1. REST API** | HTTPS ישיר | **הטורקי (API)** | מהירות שיא (~200ms), אינו דורש הפעלת דפדפן. מחזיר את כל המלאי — דורש פילטרים קפדניים. |
-| **2. WooCommerce Store API** | HTTP requests מנורמלים | **בנא, דרך היין, ארי משקאות, Liquor Store, אלכוהום, משקאות המשמח, Coffeco, Alcohol123, בית היין** | מהיר ויציב ביותר. חיפוש פרוגרסיבי דו-שלבי וקיבולת של 100 מוצרים לתוצאה. |
-| **3. CloakBrowser + Magento Extractor** | Stealth Chromium + Beautiful Soup | **פאנקו, היבואן** | מעקף מוחלט של Cloudflare. סלקטורים מותאמים ל-Magento (`div.product-item` ו-`li.product`). |
-| **4. CloakBrowser HTML Fallback** | Stealth Chromium | **אליאסי משקאות, לגימה, שר המשקאות, Drinks4U** | טעינת HTML מרונדר דרך CloakBrowser עם בידוד סשנים מלא לכל חנות. |
-| **5. Playwright Render Engine** | CloakBrowser Page Context | **מנו וינו, בית המשקאות של אביב, Wine & More** | אתרי SPA מורכבים מבוססי JS/Shopify הדורשים המתנה ארוכה לרנדור. |
+המערכת מפרידה בצורה נקייה בין שני מסלולי סריקה: **API** (מהיר, ללא דפדפן) ו-**Browser** (CloakBrowser/Playwright, לאתרי JS). ההפרדה מאפשרת תחזוקה עצמאית של כל מסלול, ומונעת כשל מדבק בין חנויות API לחנויות דפדפן.
+
+> **מסמך ארכיטקטורה מלא:** ראה [`ARCHITECTURE.md`](./ARCHITECTURE.md) להסבר מפורט על מודולים, data flow, ו-responsibilities.
+
+### מסלול 1 — REST API (מהיר, ללא דפדפן)
+
+סריקה ישירה דרך HTTP (httpx) ללא הפעלת Chromium. המהיר ביותר — ~200ms לחנות.
+
+| מנוע | חנויות | הערות |
+|------|--------|-------|
+| **Haturki REST API** | הטורקי (reference) | API ייעודי, מחזיר את כל המלאי (3682 מוצרים) — דורש פילטרים קפדניים. |
+| **WooCommerce Store API** | בנא, דרך היין, ארי, Liquor Store, אלכוהום, משקאות המשמח, Coffeco, Alcohol123, בית היין | חיפוש פרוגרסיבי דו-שלבי (2 מילים → 1 מילה), 100 מוצרים לתוצאה. |
+| **HTML Scraper** (CloakBrowser fetch + BeautifulSoup) | שר המשקאות, אליאסי, לגימה, Drinks4U | טעינת HTML דרך CloakBrowser (מעקף Cloudflare) עם פרסור סטטי, ללא רנדור JS מלא. |
+
+### מסלול 2 — CloakBrowser / Playwright (דפדפן מלא, JS render)
+
+סריקה דרך דפדפן Chromium חשאשי (CloakBrowser — 58 פאטצ'ים ברמת C++). נדרש לאתרים שטוענים מוצרים דינמית או דורשים אינטראקציה (פופאפ גיל).
+
+| מנוע | חנויות | הערות |
+|------|--------|-------|
+| **CloakBrowser + Magento Extractor** | פאנקו, היבואן | מעקף Cloudflare, סלקטורים מותאמים ל-Magento. קיצור שאילתה ל-2 מילים. |
+| **CloakBrowser JS Render** | מנו וינו (Shopify), בית המשקאות של אביב (Elementor), Wine & More (custom JS) | אתרי SPA מורכבים הדורשים המתנה ארוכה לרנדור. |
+
+> **אזהרה:** חנויות מסלול 2 חייבות להיסרק **סדרתית בלבד** — CloakBrowser מקים תהליך Chromium שלם לכל חנות. מקביליות תגרום לנעילת קבצי Session וקריסת זיכרון.
+
+### טבלת חנויות מלאה (20 חנויות)
+
+| # | חנות | URL | מסלול | מנוע |
+|---|------|-----|-------|------|
+| 1 | הטורקי (reference) | haturki.com | API | Haturki REST API |
+| 2 | פאנקו | paneco.co.il | Browser | CloakBrowser + Magento |
+| 3 | בנא משקאות | banamashkaot.co.il | API | WooCommerce Store API |
+| 4 | היבואן | the-importer.co.il | Browser | CloakBrowser + Magento |
+| 5 | דרך היין | wineroute.co.il | API | WooCommerce Store API |
+| 6 | שר המשקאות | mashkaot.co.il | API (HTML fetch) | HTML Scraper (`.product-box`) |
+| 7 | אליאסי משקאות | eliasi.co.il | API (HTML fetch) | HTML Scraper (`.products__block`) |
+| 8 | ארי משקאות | ari-g.co.il | API | WooCommerce Store API |
+| 9 | Liquor Store | liquor-store.co.il | API | WooCommerce Store API |
+| 10 | אלכוהום | alcohome.co.il | API | WooCommerce Store API |
+| 11 | משקאות המשמח | hamesameach.co.il | API | WooCommerce Store API |
+| 12 | מנו וינו | manovino.co.il | Browser | CloakBrowser (Shopify) |
+| 13 | בית המשקאות של אביב | avivdrinks.co.il | Browser | CloakBrowser (Elementor) |
+| 14 | Wine & More | wineandmore.co.il | Browser | CloakBrowser (custom JS) |
+| 15 | לגימה | legima.co.il | API (HTML fetch) | HTML Scraper (`.boxItem-wrap`) |
+| 16 | Coffeco | coffeco.co.il | API | WooCommerce Store API |
+| 17 | Drinks4U | drinks4u.co.il | API (HTML fetch) | HTML Scraper (`.prod-box`) |
+| 18 | Alcohol123 | alcohol123.co.il | API | WooCommerce Store API |
+| 19 | בית היין | winehouse.co.il | API | WooCommerce Store API |
+
+> סה"כ: **11 חנויות API** (1 REST + 9 WooCommerce + 1 HTML) · **5 חנויות Browser** · **4 חנויות HTML fetch** — מסלול ה-API וה-HTML נחשבים "ללא דפדפן מלא".
+
+### מאמצי יציבות (Stability Improvements)
+
+המערכת עוברת שיפורי יציבות מתמשכים. המנגנונים המרכזיים:
+
+- **Hard timeout לכל חנות** (90-120 שניות) — חנות אחת שתקועה לא יכולה לעצור ריצה מלאה.
+- **שמירה מיידית ל-SQLite** — כל חנות נשמרת בנפרד, תוצאות חלקיות שורדות כשלונות.
+- **Health Gate** — ה-Orchestrator בודק response rate לפני סריקה; אם מתחת לסף, הסריקה מבוטלת.
+- **LLM Deal Validation** — דילים מועמדים עוברים אימות LLM למניעת false positives.
+- **Strict Volume Matching** (±50ml) — מונע השוואת 200ml מול 1L.
+- **Brand Hard Price Floors** — מחירים נמוכים מהרצפה לפי מותג נפסלים אוטומטית.
+- **CloakBrowser Non-Persistent Context** — כל חנות מקבל קונטקסט נקי, מונע זליגת cookies בין חנויות.
 
 ---
 
@@ -194,9 +249,71 @@ streamlit run dashboard.py --server.port 5053
 
 ---
 
+## 🔀 Concurrency Control
+
+החל מ-v2.5.0, המערכת מריצה סריקה מקבילית חכמה במקום סדרתית, תוך הפרדה בין חנויות API (קלות) לחנויות דפדפן (כבדות).
+
+### הבעיה
+
+- סריקה סדרתית של 20 חנויות = ~14-15 דקות (איטי מדי).
+- הרצת הכל במקביל גורמת ל-CloakBrowser לקרוס (נעילת Session + מחסנית זיכרון — 10 תהליכי Chromium בו-זמנית).
+
+### הפתרון
+
+`UnifiedScraper.search_all()` מפצל את החנויות לשתי קבוצות ומריץ את שתיהן ב-`asyncio.gather`:
+
+| קבוצה | מנועים | מגבלת מקביליות | חנויות |
+|-------|--------|----------------|--------|
+| **API** (קלות) | `woocommerce`, `magento`, `haturki_api` | **ללא הגבלה** — כולן רצות במקביל | בנא, דרך היין, ארי, Liquor Store, אלכוהום, משקאות המשמח, Coffeco, Alcohol123, בית היין |
+| **Browser** (כבדות) | `playwright*`, `magento_html`, `sar`, `prodbox_*`, HTML fallback | **`MAX_BROWSER_CONCURRENCY = 3`** — `asyncio.Semaphore` | פאנקו, היבואן, אליאסי, לגימה, שר המשקאות, Drinks4U, מנו וינו, בית המשקאות של אביב, Wine & More |
+
+### איך זה עובד
+
+```
+search_all(query)
+    │
+    ├─ Split stores: API vs Browser
+    │
+    ├─ asyncio.gather(
+    │     [api_store_1, api_store_2, ... api_store_9],      ← unlimited, all at once
+    │     [browser_store_1, ... browser_store_10],         ← Semaphore(3) gates these
+    │   )
+    │
+    └─ Each browser scraper:
+         ├─ log: "waiting for semaphore slot"
+         ├─ await semaphore.acquire()     ← blocks if 3 already running
+         ├─ log: "acquired semaphore slot"
+         ├─ scraper.search(query)         ← launches CloakBrowser/Playwright
+         ├─ finally: semaphore.release()  ← ALWAYS releases, even on error
+         └─ log: "released semaphore slot"
+```
+
+### ניקוי משאבים (Resource Cleanup)
+
+- כל סקראפר דפדפן סוגר את ה-`page` וה-`context` שלו ב-`finally` block (בתוך `playwright_scrapers.py` / `html_scrapers.py`).
+- ה-`_scrape_one_store` wrapper מבטיח ש-`semaphore.release()` רץ תמיד — גם אם הסקראפר קרס, גם אם היה timeout, גם אם הייתה שגיאה.
+- כל חנות עטופה ב-`asyncio.wait_for(timeout)` — חנות שנתקעת לא חוסמת את השאר.
+
+### הגדרות
+
+```python
+# unified_scraper.py — UnifiedScraper class
+
+MAX_BROWSER_CONCURRENCY = 3   # max parallel browser scrapers
+API_ENGINES = {"haturki_api", "woocommerce", "magento"}  # no-limit engines
+```
+
+### תוצאות בפועל
+
+- חנויות API (9) מסתיימות תוך ~5-10 שניות (כולן במקביל).
+- חנויות דפדפן (10) רצות ב-3 קבוצות מקביליות, כל קבוצה ~30-60 שניות.
+- זמן כולל: ~4-6 דקות (לעומת 14-15 דקות סדרתי).
+
+---
+
 ## ⚠️ Pitfalls ולקחים קריטיים
 
-1. **הרצה סדרתית בלבד**: CloakBrowser מקים תהליך Chromium שלם לכל חנות מבוססת דפדפן. ניסיונות להריץ במקביל יובילו לנעילת קבצי Session, צריכת זיכרון מופרזת וקריסת המנוע.
+1. **מניעת קריסות מקביליות בדפדפן**: CloakBrowser מקים תהליך Chromium שלם לכל חנות מבוססת דפדפן. ניסיון להריץ את כל 10 החנויות הדפדפניות במקביל יוביל לנעילת קבצי Session, צריכת זיכרון מופרזת וקריסת המנוע. המערכת משתמשת ב-`asyncio.Semaphore` להגבלת מקביליות הדפדפנים ל-3 (ראה Concurrency Control למטה).
 2. **דילוג על פופאפ גיל באתרי Magento**: פופאפ אימות הגיל ("אני מעל 18") באתרי פאנקו והיבואן גורם ללחיצה שגויה ב-JavaScript שמפנה לדפי קוקטיילים שבורים. הקוד מדלג אוטומטית על מנגנון הטיפול בפופאפ גיל בחנויות אלו.
 3. **עבודה ללא persistent context**: שימוש ב-Session שמור קבוע גרם לפאנקו לטעון עוגיות ישנות ולהחזיר מוצרים לא קשורים. המנוע יוצר מופע נפרד ונקי (`launch_async`) לכל חנות וסוגר אותו מיד בסיום.
 4. **www redirect בארי משקאות**: `www.ari-g.co.il` מבצע 301 redirect ל-`ari-g.co.il` (ללא www). חובה להשתמש בכתובת ללא www ב-`config.yaml`.
