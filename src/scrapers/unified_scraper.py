@@ -47,6 +47,7 @@ class WooCommerceAPIScraper:
     """
     
     def __init__(self, store: Store):
+        """Bind the scraper to a specific Store (URL + name)."""
         self.store = store
     
     async def search(self, query: str) -> List[ProductPrice]:
@@ -202,6 +203,7 @@ class MagentoAPIScraper:
     """Scrapes Magento stores via their REST API."""
     
     def __init__(self, store: Store):
+        """Bind the scraper to a specific Store (URL + name)."""
         self.store = store
     
     async def search(self, query: str) -> List[ProductPrice]:
@@ -306,6 +308,12 @@ class MagentoAPIScraper:
         return products
     
     def _extract_volume(self, text: str) -> Optional[float]:
+        """Extract volume in milliliters from product text.
+
+        Recognizes Hebrew (ליטר, מ"ל) and English (L, ml) units.
+        Liters are multiplied by 1000 to return milliliters.
+        Returns None if no volume pattern is found.
+        """
         m = re.search(r'(\d+\.?\d*)\s*(?:ליטר|ל|L|ml|מ"?ל)', text)
         if m:
             val = float(m.group(1))
@@ -320,6 +328,14 @@ class HTMLFallbackScraper:
     """Fallback: scrape search results from HTML (no JS)."""
     
     def __init__(self, store: Store, search_pattern: str = None):
+        """Initialize the HTML fallback scraper.
+
+        Args:
+            store: The Store to scrape.
+            search_pattern: Optional URL template (with ``{query}`` placeholder)
+                to try first. If None or no products found, a list of common
+                patterns (WordPress, generic search) is tried in order.
+        """
         self.store = store
         self.search_pattern = search_pattern
     

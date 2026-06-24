@@ -96,8 +96,10 @@ verification popups).
 | `PwScraperFactory` | Factory that returns the right Playwright scraper |
 
 **Key constraint:** CloakBrowser instantiates a full Chromium process
-per store, so browser-based stores **must** be scraped sequentially
-(never in parallel) to avoid session lock files and memory exhaustion.
+per store. To avoid session lock files and memory exhaustion, browser
+stores are gated by an `asyncio.Semaphore(MAX_BROWSER_CONCURRENCY=3)` —
+at most 3 browser scrapers run in parallel. API stores (WooCommerce,
+Magento, Haturki) run concurrently with no limit. See §7 for details.
 
 ---
 
@@ -153,8 +155,9 @@ per store, so browser-based stores **must** be scraped sequentially
 │  2. SCRAPE                                                           │
 │     run.search_all() orchestrates:                                   │
 │       a. HaturkiAPIScraper → Turki baseline (fast, ~200ms)          │
-│       b. UnifiedScraper.search_all() → 19 stores sequentially        │
-│          Each store → get_scraper() → right engine → search()       │
+│       b. UnifiedScraper.search_all() → 19 stores concurrently       │
+│          Split: API stores (unlimited) + browser stores (Semaphore  │
+│          = 3). Each store → get_scraper() → right engine → search()│
 │          Per-store hard timeout (90-120s) via asyncio.wait_for      │
 │     Results saved to SQLite immediately (partial progress survives) │
 └───────────────────────────────┬──────────────────────────────────────┘
@@ -215,10 +218,10 @@ per store, so browser-based stores **must** be scraped sequentially
 
 | File | Responsibility |
 |------|----------------|
-| `unified_scraper.py` | **Main orchestrator.** `UnifiedScraper` dispatches to the right scraper per store via `STORE_CONFIGS`. Contains `WooCommerceAPIScraper`, `MagentoAPIScraper`, `HTMLFallbackScraper`. `search_all()` runs all stores sequentially with per-store timeouts. |
+| `unified_scraper.py` | **Main orchestrator.** `UnifiedScraper` dispatches to the right scraper per store via `STORE_CONFIGS`. Contains `WooCommerceAPIScraper`, `MagentoAPIScraper`, `HTMLFallbackScraper`. `search_all()` splits stores into API (unlimited concurrency) and browser (`asyncio.Semaphore(3)`) groups, dispatches both via `asyncio.gather`. Per-store hard timeout (90-120s) via `asyncio.wait_for`. Also holds the `BROWSER_TIMEOUT` mirror dict for central timeout configuration. |
 | `api_scrapers.py` | `HaturkiAPIScraper` (custom REST API for Turki), `GenericAPIScraper` (legacy HTML-from-API), `StoreScraperFactory`. |
 | `html_scrapers.py` | HTML-based scrapers for stores without APIs. `MagentoHTMLScraper`, `SarHascraper`, `ProdBoxScraper`, `StoreMatcher`. Shared `_fetch_html()` helper (CloakBrowser → httpx fallback). |
-| `playwright_scrapers.py` | CloakBrowser/Playwright scrapers for JS-heavy stores. `PlaywrightEngine` (shared browser pool), `GenericPlaywrightScraper` (base), store-specific subclasses (Paneco, Importer, Aviv, ManoVino, WineAndMore), `PwScraperFactory`. |
+| `playwright_scrapers.py` | CloakBrowser/Playwright scrapers for JS-heavy stores. `PlaywrightEngine` (shared browser pool), `GenericPlaywrightScraper` (base), store-specific subclasses (Paneco, Importer, Aviv, ManoVino, WineAndMore), `PwScraperFactory`. Includes EPIPE detection (`_is_epipe_error`), retry with backoff (`_browser_retry`), separate browser timeouts (`BROWSER_TIMEOUTS`), and guaranteed context/page cleanup in `finally` blocks. |
 
 ### Agents (`src/agents/`)
 
@@ -303,7 +306,11 @@ keyword matching if LLM is unavailable. Plans are cached in-memory for
 | Mechanism | Location | Purpose |
 |-----------|----------|---------|
 | Per-store hard timeout (90-120s) | `UnifiedScraper.STORE_TIMEOUTS` | One hanging store can't stall the whole run |
-| Sequential scraping for browser stores | `UnifiedScraper.search_all()` | Avoids CloakBrowser session lock + memory issues |
+| Browser concurrency limit (Semaphore) | `UnifiedScraper.search_all()` — `asyncio.Semaphore(3)` | At most 3 CloakBrowser/Playwright scrapers in parallel; avoids Chromium memory exhaustion and session lock contention. API stores run unlimited. |
+| EPIPE / BrokenPipeError handling | `playwright_scrapers._is_epipe_error()` | Detects IPC pipe breaks from the Node.js Playwright driver in 3 forms: Python `BrokenPipeError`, `OSError` with `errno.EPIPE`/`ECONNRESET`, and string-form `"EPIPE"`/`"PipeTransport"` messages. |
+| Browser retry with exponential backoff | `playwright_scrapers._browser_retry()` | Retries transient browser ops (EPIPE, TimeoutError, ConnectionError) up to 3 attempts with 2s→4s→8s backoff. Uses a coro_factory so each attempt re-executes the work. Non-retriable errors propagate immediately. |
+| Separate browser timeouts (ms) | `playwright_scrapers.BROWSER_TIMEOUTS` | `navigation`=30s (page.goto/domcontentloaded), `networkidle`=45s, `store_max`=60s ceiling. Separate from the API-level `STORE_TIMEOUTS` (90-120s) so browser and API phases are tuned independently. Mirrored in `UnifiedScraper.BROWSER_TIMEOUT`. |
+| Guaranteed context cleanup | `GenericPlaywrightScraper.search()` | Outer `try/finally` closes browser context even on EPIPE; inner `try/finally` closes each page. Cleanup errors are swallowed so they never mask the original failure. |
 | Partial progress to SQLite | `save_store_result()` per store | Failed stores don't lose successful ones |
 | Health gate before scan | `OrchestratorAgent.execute()` | Skip scan if response rate < threshold |
 | LLM deal validation | `run.build_report()` → `llm_validate_deal()` | Reject false-positive deals |
@@ -314,6 +321,44 @@ keyword matching if LLM is unavailable. Plans are cached in-memory for
 | Progressive querying (WooCommerce/Magento) | API scrapers | Bypass strict server-side matching for Hebrew |
 | CloakBrowser non-persistent context | `playwright_scrapers._create_cloak_context()` | Avoid cookie/session interference between stores |
 | Age popup skip for Magento | `GenericPlaywrightScraper.search()` | Paneco/Importer age click caused wrong redirects |
+
+### Concurrency Model in Detail
+
+`UnifiedScraper.search_all()` splits stores into two groups at dispatch
+time:
+
+```
+asyncio.gather(
+    [api_store_1, api_store_2, … api_store_9],      ← unlimited, all at once
+    [browser_store_1, … browser_store_10],           ← Semaphore(3) gates these
+)
+```
+
+- **API group** (`woocommerce`, `magento`, `haturki_api`): lightweight
+  httpx calls, no concurrency limit.
+- **Browser group** (everything else — `playwright*`, `magento_html`,
+  `sar`, `prodbox_*`, HTML fallback): each `_scrape_one_store()` call
+  acquires the shared `asyncio.Semaphore(3)` before launching a browser
+  and releases it in a `finally` block — even on error.
+
+A fresh `Semaphore` is created per `search_all()` call so a long-running
+run cannot bleed semaphore slots into the next one.
+
+### Browser Retry and EPIPE Handling
+
+The Node.js Playwright driver communicates with Chromium over an IPC
+pipe. Under heavy concurrent load this pipe can break, surfacing as
+`BrokenPipeError` or a string `"Error: write EPIPE at PipeTransport…"`.
+The module handles this in three layers:
+
+1. **`_is_epipe_error(exc)`** — classifies an exception as EPIPE-related
+   (covers all three forms above).
+2. **`_is_browser_retriable(exc)`** — extends EPIPE detection with
+   `PwTimeout`, `asyncio.TimeoutError`, and `ConnectionError`.
+3. **`_browser_retry(coro_factory, store_name, op_desc)`** — wraps a
+   browser operation in up to 3 attempts with exponential backoff
+   (2s → 4s). Used for `launch_async`, `chromium.launch`, `page.goto`,
+   and `page.content`.
 
 ---
 

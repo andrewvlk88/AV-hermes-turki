@@ -208,7 +208,19 @@ class PlaywrightEngine:
 
 
 async def _create_context(browser):
-    """Create a context with stealth settings (Playwright fallback only)."""
+    """Create a Playwright browser context with stealth anti-detection settings.
+
+    Configures locale (he-IL), timezone (Asia/Jerusalem), a randomized User-Agent,
+    and a 1920×1080 viewport. If ``playwright-stealth`` is installed, applies
+    stealth patches to a throwaway page; otherwise injects a JS init script that
+    masks ``navigator.webdriver``, ``plugins``, and ``languages``.
+
+    Args:
+        browser: A Playwright Browser instance to create the context on.
+
+    Returns:
+        A configured Playwright BrowserContext ready for ``new_page()``.
+    """
     context = await browser.new_context(
         ignore_https_errors=True,
         user_agent=_get_ua(),
@@ -268,6 +280,15 @@ class GenericPlaywrightScraper:
     """
     
     def __init__(self, store: Store, config: dict = None):
+        """Initialize the scraper with a store and optional config.
+
+        Args:
+            store: The Store to scrape (name, url, search_path).
+            config: Optional dict with ``timeout`` (ms, per-store override)
+                and ``search_patterns`` (list of URL templates with
+                ``{query}`` placeholder). When omitted, defaults from
+                :data:`BROWSER_TIMEOUTS` and a generic pattern list are used.
+        """
         self.store = store
         self.config = config or {}
         # CloakBrowser is slower to render — give more timeout.
@@ -518,6 +539,7 @@ class AvivDrinksScraper(GenericPlaywrightScraper):
     """
     
     def __init__(self, store: Store):
+        """Configure AvivDrinks with a 15s timeout and Elementor search patterns."""
         super().__init__(store, {
             "timeout": 15000,
             "search_patterns": [
@@ -535,6 +557,7 @@ class ManoVinoScraper(GenericPlaywrightScraper):
     """
     
     def __init__(self, store: Store):
+        """Configure ManoVino with a 15s timeout and Shopify search patterns."""
         super().__init__(store, {
             "timeout": 15000,
             "search_patterns": [
@@ -554,6 +577,7 @@ class WineAndMoreScraper(GenericPlaywrightScraper):
     """
     
     def __init__(self, store: Store):
+        """Configure Wine & More with a 20s timeout and custom search pattern."""
         super().__init__(store, {
             "timeout": 20000,
             "search_patterns": [
@@ -731,6 +755,7 @@ class PanecoScraper(GenericPlaywrightScraper):
     """
     
     def __init__(self, store: Store):
+        """Configure Paneco with a 30s timeout and Magento search pattern."""
         super().__init__(store, {
             "timeout": 30000,
             "search_patterns": [
@@ -838,6 +863,7 @@ class ImporterScraper(GenericPlaywrightScraper):
     """
     
     def __init__(self, store: Store):
+        """Configure Importer with a 30s timeout and Magento search pattern."""
         super().__init__(store, {
             "timeout": 30000,
             "search_patterns": [
