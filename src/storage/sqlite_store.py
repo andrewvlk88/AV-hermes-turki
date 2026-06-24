@@ -370,3 +370,65 @@ def get_run_status(run_id: str) -> List[Dict]:
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def get_recent_store_status(store_name: str, limit: int = 3) -> List[Dict]:
+    """Get the most recent N status rows for a single store.
+
+    Used by the Circuit Breaker to detect chronically failing stores:
+    if a store has failed (status='error') in ALL of its last N runs,
+    it is pre-skipped at the start of search_all() to save time.
+
+    Args:
+        store_name: Hebrew store name (matches store_status.store_name).
+        limit: Number of most-recent rows to return (default 3).
+
+    Returns:
+        List of dicts (newest first) with keys: run_id, query, store_name,
+        status, product_count, error_msg, timestamp. Empty list if the
+        store has no history yet.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT run_id, query, store_name, status, product_count,
+                   error_msg, timestamp
+            FROM store_status
+            WHERE store_name = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (store_name, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    except Exception:
+        # Table may not exist yet on a fresh DB — treat as no history.
+        return []
+    finally:
+        conn.close()
+
+
+def get_chronic_failure_stores(store_names: List[str], lookback: int = 3) -> set:
+    """Return the set of stores that failed in ALL of their last `lookback` runs.
+
+    A store is considered a chronic failure if:
+      1. It has at least `lookback` status rows in store_status, AND
+      2. Every one of those last `lookback` rows has status='error'.
+
+    Stores with fewer than `lookback` rows are NOT flagged — we need
+    enough history to be confident the store is genuinely broken.
+
+    Args:
+        store_names: List of store names to check.
+        lookback: Minimum number of past runs required to flag a store.
+
+    Returns:
+        Set of store names that are chronic failures.
+    """
+    chronic = set()
+    for name in store_names:
+        rows = get_recent_store_status(name, limit=lookback)
+        if len(rows) >= lookback and all(r.get("status") == "error" for r in rows):
+            chronic.add(name)
+    return chronic

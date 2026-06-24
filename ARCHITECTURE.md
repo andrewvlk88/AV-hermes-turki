@@ -308,7 +308,10 @@ keyword matching if LLM is unavailable. Plans are cached in-memory for
 | Per-store hard timeout (90-120s) | `UnifiedScraper.STORE_TIMEOUTS` | One hanging store can't stall the whole run |
 | Browser concurrency limit (Semaphore) | `UnifiedScraper.search_all()` — `asyncio.Semaphore(3)` | At most 3 CloakBrowser/Playwright scrapers in parallel; avoids Chromium memory exhaustion and session lock contention. API stores run unlimited. |
 | EPIPE / BrokenPipeError handling | `playwright_scrapers._is_epipe_error()` | Detects IPC pipe breaks from the Node.js Playwright driver in 3 forms: Python `BrokenPipeError`, `OSError` with `errno.EPIPE`/`ECONNRESET`, and string-form `"EPIPE"`/`"PipeTransport"` messages. |
-| Browser retry with exponential backoff | `playwright_scrapers._browser_retry()` | Retries transient browser ops (EPIPE, TimeoutError, ConnectionError) up to 3 attempts with 2s→4s→8s backoff. Uses a coro_factory so each attempt re-executes the work. Non-retriable errors propagate immediately. |
+| Browser retry with exponential backoff | `playwright_scrapers._browser_retry()` | Retries transient browser ops (EPIPE, TimeoutError, ConnectionError) up to 3 attempts (4 for hard stores) with per-store backoff config via `_retry_config_for()`. Non-retriable errors propagate immediately. |
+| Smart retry for hard stores | `playwright_scrapers.HARD_STORES` + `_retry_config_for()` | Stores פאנקו, היבואן, שר המשקאות get 4 attempts (1+3 retries) with 5s base, 1.5x backoff — longer window for slow Cloudflare challenges. |
+| Circuit breaker (per-batch) | `UnifiedScraper._scrape_one_store()` + `circuit_breaker` dict | After N consecutive failures (default 2) within a search_all() batch, skip the store for remaining products. Fresh state per batch. |
+| Circuit breaker (DB pre-skip) | `sqlite_store.get_chronic_failure_stores()` | If a store failed in ALL of its last 3 runs (store_status table), pre-skip it at the start of search_all(). |
 | Separate browser timeouts (ms) | `playwright_scrapers.BROWSER_TIMEOUTS` | `navigation`=30s (page.goto/domcontentloaded). Separate from the API-level `STORE_TIMEOUTS` (90-120s) so browser and API phases are tuned independently. |
 | Guaranteed context cleanup | `GenericPlaywrightScraper.search()` | Outer `try/finally` closes browser context even on EPIPE; inner `try/finally` closes each page. Cleanup errors are swallowed so they never mask the original failure. |
 | Partial progress to SQLite | `save_store_result()` per store | Failed stores don't lose successful ones |
@@ -355,10 +358,108 @@ The module handles this in three layers:
    (covers all three forms above).
 2. **`_is_browser_retriable(exc)`** — extends EPIPE detection with
    `PwTimeout`, `asyncio.TimeoutError`, and `ConnectionError`.
-3. **`_browser_retry(coro_factory, store_name, op_desc)`** — wraps a
-   browser operation in up to 3 attempts with exponential backoff
-   (2s → 4s). Used for `launch_async`, `chromium.launch`, `page.goto`,
-   and `page.content`.
+3. **`_browser_retry(coro_factory, store_name, op_desc, …)`** — wraps a
+   browser operation in up to N attempts with exponential backoff.
+   Used for `launch_async`, `chromium.launch`, `page.goto`, and
+   `page.content`. Retry parameters are per-store via
+   `_retry_config_for()` (see Smart Retry below).
+
+### Smart Retry for Hard Stores
+
+Three stores consistently timeout or suffer EPIPE under load and need
+more aggressive retry than the default:
+
+| Store | Engine | Default timeout | Problem |
+|-------|--------|-----------------|---------|
+| פאנקו (Paneko) | Magento via CloakBrowser | 120s | Cloudflare challenge + slow AJAX |
+| היבואן (The Importer) | Magento via CloakBrowser | 120s | Same as Paneko |
+| שר המשקאות | HTML via CloakBrowser | 90s | Slow page load, intermittent EPIPE |
+
+These are listed in the `HARD_STORES` set in `playwright_scrapers.py`.
+The `_retry_config_for(store_name)` helper returns per-store retry
+parameters:
+
+| | Default stores | Hard stores |
+|--|----------------|-------------|
+| Max attempts | 3 (1 + 2 retries) | **4** (1 + 3 retries) |
+| Base delay | 2.0s | **5.0s** |
+| Backoff factor | 2.0x | **1.5x** |
+| Total retry window | ~6s (2→4) | ~24s (5→7.5→11.25) |
+
+The gentler 1.5x curve for hard stores gives a slow Cloudflare challenge
+more time to clear on each retry without an excessively long total wait.
+Each retry attempt is logged with the store name and attempt number:
+`[פאנקו] browser op 'goto …' failed (attempt 2/4): … — retrying in 7.5s`.
+
+### Circuit Breaker
+
+The Circuit Breaker prevents chronically failing stores from wasting
+time across a multi-product batch. Without it, 3 broken stores × 120s
+timeout × 6 products = 36 minutes of wasted time per scan.
+
+**Two layers of protection:**
+
+#### 1. Per-batch circuit breaker (in-memory)
+
+`UnifiedScraper.search_all()` maintains a `circuit_breaker` dict:
+
+```python
+{store_name: {"failures": int, "tripped": bool}}
+```
+
+- After each store scrape, `_scrape_one_store()` updates the state:
+  - **Success** → reset `failures` to 0, `tripped` = False.
+  - **Failure** → increment `failures`. If `failures ≥
+    CIRCUIT_BREAKER_THRESHOLD` (default 2), set `tripped` = True and
+    log: `🔌 Circuit breaker tripped for {store} after {N} consecutive
+    failures — skipping for remaining products`.
+- Before each scrape, if `tripped` is True, the store is skipped with:
+  `⏭️ Skipping {store} (circuit breaker open)`.
+- State is **fresh per `search_all()` call** — a new batch starts with
+  a clean slate. This is intentional: a store may be temporarily down
+  for one batch but recover by the next.
+
+#### 2. DB history pre-skip (chronic failures)
+
+At the start of each `search_all()`, the system queries the
+`store_status` table for the last `CIRCUIT_BREAKER_DB_LOOKBACK` runs
+(default 3) per store. If a store has `status='error'` in **ALL** of
+those runs, it is pre-skipped with:
+
+`⚠️ Pre-skip {store} — failed in last 3 consecutive runs`
+
+This catches stores that have been broken for hours/days, not just the
+current batch. Stores with fewer than `CIRCUIT_BREAKER_DB_LOOKBACK`
+rows are NOT flagged — we need enough history to be confident.
+
+#### Configuration
+
+```python
+# unified_scraper.py — UnifiedScraper class
+CIRCUIT_BREAKER_THRESHOLD = 2       # consecutive failures to trip
+CIRCUIT_BREAKER_DB_LOOKBACK = 3     # past runs to check for chronic failure
+```
+
+```python
+# playwright_scrapers.py — module level
+HARD_STORES = {"פאנקו", "היבואן", "שר המשקאות"}
+HARD_RETRY_MAX_ATTEMPTS = 4
+HARD_RETRY_BASE_DELAY = 5.0
+HARD_RETRY_BACKOFF_FACTOR = 1.5
+```
+
+#### Log output example
+
+```
+search_all: 18 stores | API(unlimited)=9 | Browser(semaphore=3)=9
+⚠️ Pre-skip פאנקו — failed in last 3 consecutive runs
+⚠️ Pre-skip היבואן — failed in last 3 consecutive runs
+⏭️ Skipping פאנקו (circuit breaker open)
+⏭️ Skipping היבואן (circuit breaker open)
+🔌 Circuit breaker tripped for שר המשקאות after 2 consecutive failures — skipping for remaining products
+⏭️ Skipping שר המשקאות (circuit breaker open)
+search_all complete: 15/18 stores returned data
+```
 
 ---
 

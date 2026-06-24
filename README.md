@@ -233,6 +233,7 @@ streamlit run dashboard.py --server.port 5053
 - **Strict Volume Matching** (±50ml) — מונע השוואת 200ml מול 1L.
 - **Brand Hard Price Floors** — מחירים נמוכים מהרצפה לפי מותג נפסלים אוטומטית.
 - **CloakBrowser Non-Persistent Context** — כל חנות מקבל קונטקסט נקי, מונע זליגת cookies בין חנויות.
+- **Circuit Breaker (v2.7+)** — חנויות שנכשלות N פעמים ברצף באותו batch מדלגות אוטומטית על שאר המוצרים. בנוסף, חנויות שנכשלו ב-3 הריצות האחרונות (DB history) מדלגות מראש. חנויות קשות (פאנקו, היבואן, שר המשקאות) מקבלות 4 ניסיונות retry עם backoff מוארך (5s, 1.5x). ראה [`ARCHITECTURE.md`](./ARCHITECTURE.md) לפרטים.
 
 ---
 

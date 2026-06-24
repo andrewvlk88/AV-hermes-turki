@@ -67,6 +67,31 @@ RETRY_MAX_ATTEMPTS = 3    # total attempts (1 initial + 2 retries)
 RETRY_BASE_DELAY = 2.0    # seconds — first retry waits this long
 RETRY_BACKOFF_FACTOR = 2   # multiply delay by this each attempt (2x exponential)
 
+# --- Hard stores: need more retries + longer backoff -----------------------
+# These stores consistently timeout or suffer EPIPE under load. They get
+# 4 attempts (1 initial + 3 retries) with a gentler 1.5x backoff starting
+# at 5s (5s → 7.5s → 11.25s) so the total retry window is ~24s — long
+# enough for a slow Cloudflare challenge to clear, but still bounded.
+HARD_STORES = {
+    "פאנקו",          # Magento via CloakBrowser, 120s timeout
+    "היבואן",         # Magento via CloakBrowser, 120s timeout
+    "שר המשקאות",     # HTML via CloakBrowser, 90s timeout
+}
+HARD_RETRY_MAX_ATTEMPTS = 4    # 1 initial + 3 retries
+HARD_RETRY_BASE_DELAY = 5.0    # seconds — first retry waits this long
+HARD_RETRY_BACKOFF_FACTOR = 1.5  # gentler curve (5s → 7.5s → 11.25s)
+
+
+def _retry_config_for(store_name: str) -> tuple:
+    """Return (max_attempts, base_delay, backoff_factor) for a store.
+
+    Hard stores (listed in HARD_STORES) get extra retries with longer,
+    gentler backoff. All other stores use the default RETRY_* constants.
+    """
+    if store_name in HARD_STORES:
+        return (HARD_RETRY_MAX_ATTEMPTS, HARD_RETRY_BASE_DELAY, HARD_RETRY_BACKOFF_FACTOR)
+    return (RETRY_MAX_ATTEMPTS, RETRY_BASE_DELAY, RETRY_BACKOFF_FACTOR)
+
 
 def _is_epipe_error(exc: BaseException) -> bool:
     """Return True if *exc* is an EPIPE / BrokenPipeError (the Node.js
@@ -111,30 +136,47 @@ def _is_browser_retriable(exc: BaseException) -> bool:
     return False
 
 
-async def _browser_retry(coro_factory, store_name: str, op_desc: str):
+async def _browser_retry(coro_factory, store_name: str, op_desc: str,
+                         max_attempts: Optional[int] = None,
+                         base_delay: Optional[float] = None,
+                         backoff_factor: Optional[float] = None):
     """Run a browser operation with exponential backoff retry.
 
     ``coro_factory`` is a zero-argument callable returning a fresh coroutine
     each attempt (so retries actually re-execute the work). Retries up to
-    ``RETRY_MAX_ATTEMPTS`` times, sleeping ``RETRY_BASE_DELAY *
-    RETRY_BACKOFF_FACTOR**attempt`` seconds between attempts.
+    ``max_attempts`` times, sleeping ``base_delay * backoff_factor**attempt``
+    seconds between attempts.
+
+    Retry parameters default to the module-level RETRY_* constants but can
+    be overridden per-call — hard stores (see HARD_STORES) pass longer,
+    gentler values via _retry_config_for().
 
     Only errors classified by :func:`_is_browser_retriable` are retried;
     everything else re-raises immediately so callers see real bugs.
+
+    Each retry attempt is logged with the store name and attempt number
+    so operators can see which stores are struggling.
     """
+    if max_attempts is None:
+        max_attempts = RETRY_MAX_ATTEMPTS
+    if base_delay is None:
+        base_delay = RETRY_BASE_DELAY
+    if backoff_factor is None:
+        backoff_factor = RETRY_BACKOFF_FACTOR
+
     last_exc: Optional[BaseException] = None
-    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             return await coro_factory()
         except Exception as exc:  # noqa: BLE001 — we classify below
             last_exc = exc
-            if not _is_browser_retriable(exc) or attempt == RETRY_MAX_ATTEMPTS:
+            if not _is_browser_retriable(exc) or attempt == max_attempts:
                 # Non-retriable, or out of attempts — propagate.
                 raise
-            delay = RETRY_BASE_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1))
+            delay = base_delay * (backoff_factor ** (attempt - 1))
             logger.warning(
-                "[%s] browser op %r failed (attempt %d/%d): %s — retrying in %.0fs",
-                store_name, op_desc, attempt, RETRY_MAX_ATTEMPTS, exc, delay,
+                "[%s] browser op %r failed (attempt %d/%d): %s — retrying in %.1fs",
+                store_name, op_desc, attempt, max_attempts, exc, delay,
             )
             await asyncio.sleep(delay)
     # Should be unreachable, but keep mypy happy.
@@ -266,7 +308,8 @@ async def _create_cloak_context(store_name: str = None):
             stealth_args=True,
         )
     browser = await _browser_retry(
-        _launch, store_name or "CloakBrowser", "launch_async"
+        _launch, store_name or "CloakBrowser", "launch_async",
+        *_retry_config_for(store_name or "")
     )
     # Return the browser — caller uses browser.new_page() / browser.new_context()
     return browser
@@ -345,7 +388,8 @@ class GenericPlaywrightScraper:
                             wait_until="domcontentloaded",
                             timeout=self.navigation_timeout,
                         )
-                    await _browser_retry(_navigate, self.store.name, f"goto {search_url}")
+                    await _browser_retry(_navigate, self.store.name, f"goto {search_url}",
+                                         *_retry_config_for(self.store.name))
                     
                     await asyncio.sleep(2)
                     logger.info("Scraping %s → %s", self.store.name, search_url)
@@ -400,7 +444,8 @@ class GenericPlaywrightScraper:
                     # ── Content extraction (retried on EPIPE) ─────────────────
                     async def _get_content():
                         return await page.content()
-                    html = await _browser_retry(_get_content, self.store.name, "page.content")
+                    html = await _browser_retry(_get_content, self.store.name, "page.content",
+                                                *_retry_config_for(self.store.name))
                     products = self._extract_products(html, query)
                     
                     if products:

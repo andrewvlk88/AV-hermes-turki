@@ -469,6 +469,19 @@ class UnifiedScraper:
     # exhaustion and session-file locks. 3 is the sweet spot on a 2-4 vCPU box.
     MAX_BROWSER_CONCURRENCY = 3
 
+    # --- Circuit Breaker -----------------------------------------------------
+    # If a store fails N times in a row within a single search_all() batch,
+    # it is skipped for the remaining products in that batch. This prevents
+    # 3 chronically-broken stores (פאנקו, היבואן, שר המשקאות) from wasting
+    # 120s × N_products each.
+    #
+    # State is per-search_all() call — a fresh batch starts with a clean slate.
+    # BUT: at the start of each search_all() we also check the store_status
+    # table for chronic failures (last CIRCUIT_BREAKER_DB_LOOKBACK runs all
+    # 'error') and pre-skip those stores with a warning.
+    CIRCUIT_BREAKER_THRESHOLD = 2       # consecutive failures to trip the breaker
+    CIRCUIT_BREAKER_DB_LOOKBACK = 3     # past runs to check for chronic failure
+
     # Engines that are pure HTTP/REST API calls — lightweight, no browser.
     # These run concurrently WITHOUT any semaphore limiting.
     API_ENGINES = {"haturki_api", "woocommerce", "magento"}
@@ -569,15 +582,30 @@ class UnifiedScraper:
         progress_callback,
         run_id: str,
         browser_semaphore: asyncio.Semaphore,
+        circuit_breaker: Optional[dict] = None,
     ) -> tuple[str, list]:
         """Scrape a single store. Returns (name, products).
 
         For browser-based engines, acquires a semaphore slot before launching
         the browser and releases it in a finally block — even on error.
+
+        If a ``circuit_breaker`` dict is provided (per-search_all() state),
+        the store is skipped when its breaker is "open" (consecutive failures
+        ≥ CIRCUIT_BREAKER_THRESHOLD). After each scrape, the breaker state
+        is updated: +1 on failure, reset to 0 on success.
         """
         from src.storage.sqlite_store import (
             save_store_result, mark_store_error, mark_store_running
         )
+
+        # --- Circuit breaker: check before attempting -----------------------
+        if circuit_breaker is not None:
+            cb_entry = circuit_breaker.get(name)
+            if cb_entry and cb_entry.get("tripped"):
+                logger.warning("⏭️ Skipping %s (circuit breaker open)", name)
+                if progress_callback:
+                    progress_callback(name, 0, "⏭️ skipped (breaker)")
+                return name, []
 
         store = Store(name=name, url=url, search_path=pattern or "", type="static")
         store_timeout = UnifiedScraper.STORE_TIMEOUTS.get(
@@ -598,6 +626,7 @@ class UnifiedScraper:
         products = []
         error_msg = None
         start_ts = asyncio.get_event_loop().time()
+        succeeded = False
 
         try:
             if run_id:
@@ -627,6 +656,8 @@ class UnifiedScraper:
             if progress_callback:
                 progress_callback(name, len(products), "✅")
 
+            succeeded = True
+
         except asyncio.TimeoutError:
             error_msg = f"timeout after {store_timeout}s"
             logger.error("Store %s timed out after %ds for query %r", name, store_timeout, query)
@@ -651,6 +682,22 @@ class UnifiedScraper:
                 name, elapsed, len(products), error_msg or "none", engine, is_browser,
             )
 
+            # --- Circuit breaker: update state after scrape -----------------
+            if circuit_breaker is not None:
+                if succeeded:
+                    # Reset on success — a single good scrape clears the slate.
+                    circuit_breaker[name] = {"failures": 0, "tripped": False}
+                else:
+                    failures = circuit_breaker.get(name, {}).get("failures", 0) + 1
+                    tripped = failures >= UnifiedScraper.CIRCUIT_BREAKER_THRESHOLD
+                    circuit_breaker[name] = {"failures": failures, "tripped": tripped}
+                    if tripped:
+                        logger.warning(
+                            "🔌 Circuit breaker tripped for %s after %d consecutive failures "
+                            "— skipping for remaining products",
+                            name, failures,
+                        )
+
         return name, products
 
     @staticmethod
@@ -669,6 +716,16 @@ class UnifiedScraper:
         browser stores trickle through the semaphore. Each store is wrapped in
         asyncio.wait_for() so a single hanging site cannot stall the whole run.
         Results are saved to SQLite immediately, so partial progress survives failures.
+
+        --- Circuit Breaker ---
+        A per-batch circuit breaker dict tracks consecutive failures per store.
+        If a store fails CIRCUIT_BREAKER_THRESHOLD times in a row, it is skipped
+        for the remaining products in this batch. State is fresh per search_all()
+        call — a new batch starts clean.
+
+        Additionally, at the start of each search_all() we query the store_status
+        table for chronic failures: if a store failed in ALL of its last
+        CIRCUIT_BREAKER_DB_LOOKBACK runs, it is pre-skipped with a warning.
         """
         # Split stores into API group (unlimited) and browser group (semaphore-limited)
         api_tasks = []
@@ -691,6 +748,34 @@ class UnifiedScraper:
             total_stores, len(api_tasks), UnifiedScraper.MAX_BROWSER_CONCURRENCY, len(browser_tasks),
         )
 
+        # --- Circuit Breaker: fresh state per batch --------------------------
+        # {store_name: {"failures": int, "tripped": bool}}
+        circuit_breaker: dict = {}
+
+        # --- DB history check: pre-skip chronically failing stores -----------
+        all_store_names = [t[0] for t in api_tasks + browser_tasks]
+        try:
+            from src.storage.sqlite_store import get_chronic_failure_stores
+            chronic = get_chronic_failure_stores(
+                all_store_names,
+                lookback=UnifiedScraper.CIRCUIT_BREAKER_DB_LOOKBACK,
+            )
+            for cname in chronic:
+                logger.warning(
+                    "⚠️ Pre-skip %s — failed in last %d consecutive runs",
+                    cname, UnifiedScraper.CIRCUIT_BREAKER_DB_LOOKBACK,
+                )
+                # Mark as tripped so _scrape_one_store skips it immediately.
+                circuit_breaker[cname] = {
+                    "failures": UnifiedScraper.CIRCUIT_BREAKER_THRESHOLD,
+                    "tripped": True,
+                }
+                if progress_callback:
+                    progress_callback(cname, 0, "⚠️ pre-skipped (chronic)")
+        except Exception as e:
+            # DB may not exist yet on first run — degrade gracefully.
+            logger.debug("Circuit breaker DB lookback skipped: %s", e)
+
         browser_semaphore = asyncio.Semaphore(UnifiedScraper.MAX_BROWSER_CONCURRENCY)
 
         # Build coroutine objects — all dispatched together via asyncio.gather
@@ -698,12 +783,12 @@ class UnifiedScraper:
         for name, url, engine, pattern in api_tasks:
             coros.append(UnifiedScraper._scrape_one_store(
                 name, url, engine, pattern, query,
-                progress_callback, run_id, browser_semaphore,
+                progress_callback, run_id, browser_semaphore, circuit_breaker,
             ))
         for name, url, engine, pattern in browser_tasks:
             coros.append(UnifiedScraper._scrape_one_store(
                 name, url, engine, pattern, query,
-                progress_callback, run_id, browser_semaphore,
+                progress_callback, run_id, browser_semaphore, circuit_breaker,
             ))
 
         # Gather all results. return_exceptions=False means an unexpected error
