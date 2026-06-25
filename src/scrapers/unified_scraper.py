@@ -246,17 +246,30 @@ class WooCommerceAPIScraper:
     async def search(self, query: str) -> List[ProductPrice]:
         """Search products via WooCommerce Store API.
         
-        Uses progressive querying (first 2 words, then first 1 word as fallback)
-        to bypass strict WooCommerce matching which returns 0 results for long Hebrew queries,
-        especially when brands are abbreviated (e.g., ק.ס instead of קברנה סוביניון).
+        Uses the Smart Search & Match system:
+        1. The original query is optimized via ``optimize_search_query()`` to
+           strip domain stop-words (e.g. "יין אדום" → removed, keeping "גבעות מרלו").
+        2. The optimized short query is sent to the WooCommerce search endpoint.
+        3. Results are validated against the ORIGINAL full query via
+           ``is_relevant_product()`` with fuzzy matching + year validation.
         """
-        words = [w for w in query.split() if w not in STOP_WORDS]
+        from src.utils.query_builder import optimize_search_query
+
+        # Optimize the query for store search (strip stop-words, keep brand+variety)
+        optimized = optimize_search_query(query)
+        if optimized != query:
+            logger.info(
+                "WooCommerce: optimized query '%s' → '%s' for %s",
+                query, optimized, self.store.name,
+            )
+
+        words = [w for w in optimized.split() if w not in STOP_WORDS]
         if not words:
             return []
             
-        # Progressive search terms:
-        # Term 1: First 2 words of the query (specific search)
-        # Term 2: First word of the query (broad search to find products with abbreviations)
+        # Progressive search terms using the optimized query:
+        # Term 1: First 2 words (specific search)
+        # Term 2: First word (broad search for abbreviated brands)
         search_terms = []
         if len(words) >= 2:
             search_terms.append(" ".join(words[:2]))
@@ -403,17 +416,24 @@ class MagentoAPIScraper:
     async def search(self, query: str) -> List[ProductPrice]:
         """Search via Magento REST API.
         
-        Uses progressive querying (first 2 words, then first 1 word as fallback)
-        to bypass strict substring matching which fails for long Hebrew queries,
-        especially when brands or volumes differ.
+        Uses the Smart Search & Match system with query optimization.
+        The optimized short query is sent to Magento's search endpoint.
+        Results are validated against the original full query.
         """
-        words = [w for w in query.split() if w not in STOP_WORDS]
+        from src.utils.query_builder import optimize_search_query
+
+        optimized = optimize_search_query(query)
+        if optimized != query:
+            logger.info(
+                "Magento: optimized query '%s' → '%s' for %s",
+                query, optimized, self.store.name,
+            )
+
+        words = [w for w in optimized.split() if w not in STOP_WORDS]
         if not words:
             return []
             
-        # Progressive search terms:
-        # Term 1: First 2 words of the query (specific search)
-        # Term 2: First word of the query (broad search to find products with abbreviations)
+        # Progressive search terms using the optimized query
         search_terms = []
         if len(words) >= 2:
             search_terms.append(" ".join(words[:2]))

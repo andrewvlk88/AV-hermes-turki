@@ -1,7 +1,10 @@
 """Product name cleaning and price filtering utilities."""
 import html
 import re
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Hebrew stop words - words that shouldn't count for relevance matching
@@ -130,7 +133,24 @@ def is_bogus_price(price: float, product_name: str) -> bool:
 
 
 def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bool:
-    """Check if a product is relevant to the search query."""
+    """Check if a product is relevant to the search query.
+
+    Uses a multi-layer matching strategy:
+    1. **Exact number validation** — if the query contains a specific year
+       (e.g. "2022") or age/volume number (e.g. "12", "700"), the product
+       name MUST contain that exact number. A 2021 wine is NOT a match for
+       a 2022 query.
+    2. **Fuzzy string matching** — calculates a similarity score between
+       the normalized product name and the query using difflib.
+       Accepts only if similarity ≥ 70%.
+    3. **Word-level matching** — falls back to the original word-count
+       algorithm if fuzzy matching is inconclusive.
+
+    Args:
+        product_name: Scraped product title from the store.
+        query: Original full search query (e.g. "יין אדום גבעות מרלו 2022").
+        min_words: Minimum brand-word matches required (default 1).
+    """
     if not product_name or not query:
         return False
 
@@ -166,6 +186,50 @@ def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bo
     norm_name = normalize(product_name)
     norm_query = normalize(query)
 
+    # ── Layer 1: Critical number validation ────────────────────────────
+    # Extract all standalone numbers from the query (years, ages, volumes).
+    # If the query has "2022", and the product also mentions a year (e.g. "2021"),
+    # the years MUST match. But if the product simply doesn't mention a year,
+    # we allow it through (the store might just not include the vintage in the title).
+    query_numbers = set(re.findall(r'\b(\d{2,4})\b', norm_query))
+    if query_numbers:
+        name_numbers = set(re.findall(r'\b(\d{2,4})\b', norm_name))
+        # Check for CONFLICTING numbers: a number in the query that has a
+        # different value in the product name (e.g. query=2022, product=2021).
+        # If the product has NO numbers at all, we let it through.
+        if name_numbers:
+            # Both have numbers — check for conflicts
+            # A number in the query is "critical" if it looks like a year (4 digits)
+            # or an age statement (2 digits like "12", "18").
+            for qn in query_numbers:
+                if qn not in name_numbers:
+                    # Is this number a year/age that should match exactly?
+                    if len(qn) == 4 or (len(qn) == 2 and int(qn) >= 10):
+                        logger.debug(
+                            "is_relevant_product: REJECTED — query has '%s' but product '%s' has %s",
+                            qn, product_name[:50], name_numbers,
+                        )
+                        return False
+
+    # ── Layer 2: Fuzzy string matching ─────────────────────────────────
+    # Use difflib.SequenceMatcher for a similarity ratio between the
+    # normalized product name and the normalized query.
+    from difflib import SequenceMatcher
+    similarity = SequenceMatcher(None, norm_query, norm_name).ratio()
+
+    # Also check token-set ratio: how many query tokens appear in the name
+    query_tokens = set(norm_query.split())
+    name_tokens = set(norm_name.split())
+    if query_tokens:
+        token_overlap = len(query_tokens & name_tokens) / len(query_tokens)
+    else:
+        token_overlap = 0
+
+    # Accept if either similarity or token overlap is high enough
+    if similarity >= 0.70 or token_overlap >= 0.70:
+        return True
+
+    # ── Layer 3: Word-level matching (original algorithm) ──────────────
     if norm_query in norm_name or norm_name in norm_query:
         return True
 

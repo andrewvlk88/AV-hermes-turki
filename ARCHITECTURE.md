@@ -317,6 +317,8 @@ keyword matching if LLM is unavailable. Plans are cached in-memory for
 | Age popup skip for Magento | `GenericPlaywrightScraper.search()` | Paneco/Importer age click caused wrong redirects |
 | Adaptive Scraping Frequency | `sqlite_store.get_query_price_stability()` | Skips scanning stable queries (no change in 30+ days) unless 24h passed since last successful scrape. |
 | Direct Deal Links | `run.py` + `cron_tracker.py` | If a competitor's price is 5%+ cheaper than Turki, appends a direct store product link `[קישור לחנות](url)` to the deal alert. |
+| Smart Search & Match | `src/utils/query_builder.py` + `filters.is_relevant_product()` | Optimizes long product names for primitive search engines (strips "יין אדום", volume units, years). Validates results with fuzzy matching (≥70% similarity) + critical year/age number validation (2022≠2021). |
+| Fast Mode | `unified_scraper.FAST_MODE` + `run.py --fast` | Disables all browser-based scraping (Playwright). Only API, curl_cffi, and LLM methods. ~60s instead of 7+ min. |
 
 ### Concurrency Model in Detail
 
