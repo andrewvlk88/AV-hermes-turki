@@ -137,30 +137,46 @@ async def _fetch_html_playwright(url: str, store_name: str = None) -> Optional[s
         return None
 
 
-async def _fetch_html(url: str, store_name: str = None) -> Optional[str]:
-    """Fetch HTML using a layered fallback chain:
+async def _fetch_html(url: str, store_name: str = None, methods: list = None) -> Optional[str]:
+    """Fetch HTML using a per-store strategy-driven fallback chain.
 
-    1. **curl_cffi** (primary) — Chrome TLS fingerprint impersonation.
-       Fast, lightweight, bypasses most basic bot protections.
-    2. **CloakBrowser/Playwright** (fallback) — full stealth Chromium.
-       Handles JS-rendered pages, age gates, and advanced challenges.
-    3. **None** → caller (UnifiedScraper) triggers LLM fallback.
+    Args:
+        url: URL to fetch.
+        store_name: Store name for logging.
+        methods: Ordered list of fetch methods to try. Each method is a string:
+            - "curl_cffi"  — Chrome TLS fingerprint impersonation (fast, no browser)
+            - "playwright" — CloakBrowser stealth Chromium (fallback, full browser)
+            - "llm"        — Fetch via any available method, caller handles LLM extraction
+        If ``methods`` is None, defaults to ["curl_cffi", "playwright"]
+        (LLM fallback is handled by the caller, not this function).
+
+    Returns:
+        HTML string on success, None if all methods fail.
     """
-    # ── Stage 1: curl_cffi ─────────────────────────────────────────────
-    html_text = await _fetch_html_cffi(url, store_name)
-    if html_text:
-        return html_text
+    if methods is None:
+        methods = ["curl_cffi", "playwright"]
 
-    logger.info("curl_cffi failed for %s — falling back to Playwright", store_name or url)
+    for method in methods:
+        if method == "curl_cffi":
+            html_text = await _fetch_html_cffi(url, store_name)
+            if html_text:
+                return html_text
+            logger.info("curl_cffi failed for %s — trying next method", store_name or url)
+        elif method == "playwright":
+            html_text = await _fetch_html_playwright(url, store_name)
+            if html_text:
+                return html_text
+            logger.info("playwright failed for %s — trying next method", store_name or url)
+        # "llm" method: this function just fetches HTML. LLM extraction
+        # is done by the caller (UnifiedScraper._scrape_one_store) after
+        # we return None. So we don't handle it here — if we reach "llm"
+        # in the list and all prior methods failed, just return None and
+        # let the caller trigger LLM fallback.
+        elif method == "llm":
+            logger.info("All HTTP methods exhausted for %s — LLM fallback will be triggered by caller", store_name or url)
+            return None
 
-    # ── Stage 2: CloakBrowser/Playwright ───────────────────────────────
-    html_text = await _fetch_html_playwright(url, store_name)
-    if html_text:
-        return html_text
-
-    # ── Stage 3: all HTTP methods failed ────────────────────────────────
-    # Caller (UnifiedScraper._scrape_one_store) will trigger LLM fallback.
-    logger.warning("All HTTP fetch methods failed for %s — LLM fallback will be triggered by caller", store_name or url)
+    logger.warning("All fetch methods failed for %s", store_name or url)
     return None
 
 
@@ -171,8 +187,9 @@ class MagentoHTMLScraper:
     Patterns: .product-item, .product-item-link, .product-info, data-product-id
     """
     
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, fetch_methods: list = None):
         self.store = store
+        self.fetch_methods = fetch_methods  # Per-store strategy from STORE_STRATEGIES
     
     async def search(self, query: str) -> List[ProductPrice]:
         """Search via HTML."""
@@ -183,7 +200,7 @@ class MagentoHTMLScraper:
             "Accept-Language": "he-IL,he;q=0.9",
         }
         
-        html_text = await _fetch_html(search_url, store_name=self.store.name)
+        html_text = await _fetch_html(search_url, store_name=self.store.name, methods=self.fetch_methods)
         if not html_text: return []
         soup = BeautifulSoup(html.unescape(html_text), "lxml")
         products = []
@@ -263,8 +280,9 @@ class SarHascraper:
       .product-box-info__price-old → regular price
     """
     
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, fetch_methods: list = None):
         self.store = store
+        self.fetch_methods = fetch_methods
     
     async def search(self, query: str) -> List[ProductPrice]:
         search_url = f"{self.store.url}/?s={urllib.parse.quote(query)}&post_type=product"
@@ -273,7 +291,7 @@ class SarHascraper:
             "Accept": "text/html",
         }
         
-        html_text = await _fetch_html(search_url, store_name=self.store.name)
+        html_text = await _fetch_html(search_url, store_name=self.store.name, methods=self.fetch_methods)
         if not html_text: return []
         soup = BeautifulSoup(html.unescape(html_text), "lxml")
         products = []
@@ -346,8 +364,10 @@ class ProdBoxScraper:
                  container_class: str = "prod-box",
                  title_class: str = "prod-box__title",
                  price_class: str = "prod-box__price",
-                 search_pattern: str = "/?s={query}&post_type=product"):
+                 search_pattern: str = "/?s={query}&post_type=product",
+                 fetch_methods: list = None):
         self.store = store
+        self.fetch_methods = fetch_methods
         self.container_class = container_class
         self.title_class = title_class
         self.price_class = price_class
@@ -360,7 +380,7 @@ class ProdBoxScraper:
             "Accept": "text/html",
         }
         
-        html_text = await _fetch_html(search_url, store_name=self.store.name)
+        html_text = await _fetch_html(search_url, store_name=self.store.name, methods=self.fetch_methods)
         if not html_text: return []
         soup = BeautifulSoup(html.unescape(html_text), "lxml")
         products = []

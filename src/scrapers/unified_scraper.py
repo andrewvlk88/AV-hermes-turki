@@ -87,6 +87,101 @@ async def _cffi_get_json(url: str, headers: dict = None, timeout: float = 12.0) 
         return None
 
 
+# ════════════════════════════════════════════════════════════════════
+#  Per-Store Scraping Strategy
+# ════════════════════════════════════════════════════════════════════
+#
+# Maps store domains to their optimal scraping method sequence.
+# The system extracts the domain from the store URL, looks it up here,
+# and strictly follows the defined sequence. If a domain is not found,
+# it defaults to ["curl_cffi", "playwright", "llm"].
+#
+# Method types:
+#   "api"       — REST API (Haturki, WooCommerce, Magento). Skips HTML fetch.
+#   "curl_cffi" — Chrome TLS impersonation. Fast, no browser.
+#   "playwright" — CloakBrowser stealth Chromium. Full browser, JS render.
+#   "llm"       — LLM extracts price from raw HTML. Last resort.
+#
+# Design rationale:
+#   - WooCommerce stores: curl_cffi is sufficient (API returns JSON, no JS needed).
+#     LLM fallback catches edge cases where the API is temporarily down.
+#   - Playwright-first stores: JS-rendered SPAs (Shopify, Elementor) that need
+#     a full browser to load products. curl_cffi can't render JS.
+#   - Paneco/Importer: Cloudflare-protected Magento. curl_cffi gets past basic
+#     TLS checks; Playwright handles JS-rendered product grids + age popups.
+#   - Haturki: Dedicated REST API, no HTML scraping needed.
+
+STORE_STRATEGIES: dict[str, list[str]] = {
+    # API-only stores (no HTML fetch, direct REST API)
+    "haturki.com": ["api"],
+
+    # curl_cffi-first stores (API or simple HTML, no JS needed)
+    "banamashkaot.co.il": ["curl_cffi", "llm"],
+    "wineroute.co.il": ["curl_cffi", "llm"],
+    "ari-g.co.il": ["curl_cffi", "llm"],
+    "liquor-store.co.il": ["curl_cffi", "llm"],
+    "alcohome.co.il": ["curl_cffi", "llm"],
+    "hamesameach.co.il": ["curl_cffi", "llm"],
+    "coffeco.co.il": ["curl_cffi", "llm"],
+    "alcohol123.co.il": ["curl_cffi", "llm"],
+    "winehouse.co.il": ["curl_cffi", "llm"],
+
+    # Cloudflare-protected Magento (curl_cffi → Playwright → LLM)
+    "paneco.co.il": ["curl_cffi", "playwright", "llm"],
+    "the-importer.co.il": ["curl_cffi", "playwright", "llm"],
+
+    # Playwright-first stores (JS-rendered SPAs)
+    "manovino.co.il": ["playwright", "llm"],
+    "avivdrinks.co.il": ["playwright", "llm"],
+    "wineandmore.co.il": ["playwright", "llm"],
+    "mashkaot.co.il": ["playwright", "llm"],
+    "eliasi.co.il": ["playwright", "llm"],
+    "legima.co.il": ["playwright", "llm"],
+    "drinks4u.co.il": ["playwright", "llm"],
+}
+
+# Default fallback strategy for unknown domains
+DEFAULT_STRATEGY = ["curl_cffi", "playwright", "llm"]
+
+
+def _extract_domain(url: str) -> str:
+    """Extract the registrable domain from a store URL.
+
+    Handles URLs with/without scheme, www. prefix, and paths.
+    Examples:
+        "https://www.paneco.co.il/catalogsearch" → "paneco.co.il"
+        "https://haturki.com" → "haturki.com"
+        "ari-g.co.il" → "ari-g.co.il"
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    host = parsed.netloc or parsed.path
+    # Strip port if present
+    host = host.split(":")[0]
+    # Strip www. prefix
+    if host.startswith("www."):
+        host = host[4:]
+    return host.lower()
+
+
+def _get_store_strategy(url: str) -> list[str]:
+    """Look up the scraping strategy for a store URL.
+
+    Extracts the domain from the URL and returns the method sequence
+    from STORE_STRATEGIES. Falls back to DEFAULT_STRATEGY for unknown domains.
+    """
+    domain = _extract_domain(url)
+    strategy = STORE_STRATEGIES.get(domain, DEFAULT_STRATEGY)
+    return strategy
+
+
+# Methods that require a browser (Playwright/CloakBrowser)
+BROWSER_METHODS = {"playwright"}
+
+# Methods that are pure HTTP (no browser needed)
+HTTP_METHODS = {"api", "curl_cffi", "llm"}
+
+
 class WooCommerceAPIScraper:
     """Scrapes stores via WooCommerce REST API.
     
@@ -377,7 +472,7 @@ class MagentoAPIScraper:
 class HTMLFallbackScraper:
     """Fallback: scrape search results from HTML (no JS)."""
     
-    def __init__(self, store: Store, search_pattern: str = None):
+    def __init__(self, store: Store, search_pattern: str = None, fetch_methods: list = None):
         """Initialize the HTML fallback scraper.
 
         Args:
@@ -385,12 +480,15 @@ class HTMLFallbackScraper:
             search_pattern: Optional URL template (with ``{query}`` placeholder)
                 to try first. If None or no products found, a list of common
                 patterns (WordPress, generic search) is tried in order.
+            fetch_methods: Per-store strategy methods list (e.g. ["curl_cffi", "playwright", "llm"]).
+                Passed to _fetch_html to control the fetch method sequence.
         """
         self.store = store
         self.search_pattern = search_pattern
+        self.fetch_methods = fetch_methods
     
     async def search(self, query: str) -> List[ProductPrice]:
-        """Fetch search page via CloakBrowser and parse HTML."""
+        """Fetch search page and parse HTML."""
         from src.scrapers.html_scrapers import _fetch_html
         
         patterns_to_try = [
@@ -404,7 +502,7 @@ class HTMLFallbackScraper:
             if not pattern:
                 continue
             search_url = self.store.url.rstrip("/") + pattern.replace("{query}", quote(query))
-            html_src = await _fetch_html(search_url, store_name=self.store.name)
+            html_src = await _fetch_html(search_url, store_name=self.store.name, methods=self.fetch_methods)
             if html_src and len(html_src) > 500:
                 products = self._parse_html(html_src, query)
                 if products:
@@ -544,8 +642,27 @@ class UnifiedScraper:
         and the generic HTMLFallbackScraper (which uses CloakBrowser via
         _fetch_html). API engines (woocommerce, magento, haturki_api) are
         pure HTTP and do not need limiting.
+
+        Note: With per-store strategies (STORE_STRATEGIES), a store's actual
+        browser need is determined by whether "playwright" is in its strategy
+        AND comes before any successful method. This method provides the
+        static classification for concurrency splitting in search_all().
+        The dynamic check happens in _scrape_one_store via _strategy_needs_browser().
         """
         return engine not in UnifiedScraper.API_ENGINES
+
+    @staticmethod
+    def _strategy_needs_browser(strategy: list[str]) -> bool:
+        """Check if a store's strategy includes a browser method.
+
+        Used by search_all() to classify stores into the browser-semaphore
+        group. A store needs a browser slot if "playwright" appears anywhere
+        in its strategy sequence (it may not be the first method, but if
+        curl_cffi fails, we'll fall through to Playwright and need a slot).
+
+        Stores with ["api"] or ["curl_cffi", "llm"] never need a browser.
+        """
+        return "playwright" in strategy
     
     # Store configurations
     # Auto-generated from config.yaml — single source of truth
@@ -572,8 +689,17 @@ class UnifiedScraper:
     ]
     
     @staticmethod
-    def get_scraper(name: str, url: str):
-        """Get the right scraper for a store."""
+    def get_scraper(name: str, url: str, fetch_methods: list = None):
+        """Get the right scraper for a store.
+
+        Args:
+            name: Store name (Hebrew or English).
+            url: Store URL.
+            fetch_methods: Per-store strategy methods list. Passed to HTML
+                scrapers to control the fetch method sequence (curl_cffi →
+                playwright → llm). API scrapers ignore this (they use their
+                own HTTP client). If None, _fetch_html uses its default chain.
+        """
         store = Store(name=name, url=url, search_path="", type="static")
         
         # Find config
@@ -584,7 +710,7 @@ class UnifiedScraper:
                 break
         
         if not config:
-            return HTMLFallbackScraper(store)
+            return HTMLFallbackScraper(store, fetch_methods=fetch_methods)
         
         engine = config[2]
         search_pattern = config[3]
@@ -598,29 +724,29 @@ class UnifiedScraper:
             return MagentoAPIScraper(store)
         elif engine == "magento_html":
             from src.scrapers.html_scrapers import MagentoHTMLScraper
-            return MagentoHTMLScraper(store)
+            return MagentoHTMLScraper(store, fetch_methods=fetch_methods)
         elif engine == "sar":
             from src.scrapers.html_scrapers import SarHascraper
-            return SarHascraper(store)
+            return SarHascraper(store, fetch_methods=fetch_methods)
         elif engine == "prodbox_eliasi":
             from src.scrapers.html_scrapers import ProdBoxScraper
-            return ProdBoxScraper(store, container_class=r"products__block", title_class=r"products__title", price_class=r"products__price", search_pattern="/?s={query}&post_type=product")
+            return ProdBoxScraper(store, container_class=r"products__block", title_class=r"products__title", price_class=r"products__price", search_pattern="/?s={query}&post_type=product", fetch_methods=fetch_methods)
         elif engine == "prodbox_drinks4u":
             from src.scrapers.html_scrapers import ProdBoxScraper
-            return ProdBoxScraper(store, container_class="prod-box", title_class="prod-box__title", price_class="prod-box__price", search_pattern="/?s={query}&post_type=product")
+            return ProdBoxScraper(store, container_class="prod-box", title_class="prod-box__title", price_class="prod-box__price", search_pattern="/?s={query}&post_type=product", fetch_methods=fetch_methods)
         elif engine == "prodbox_legima":
             from src.scrapers.html_scrapers import ProdBoxScraper
-            return ProdBoxScraper(store, container_class=r"boxItem-wrap|productBoxes", title_class=r"item-name|title", price_class=r"product-box-prices|price", search_pattern="/?s={query}&post_type=product")
+            return ProdBoxScraper(store, container_class=r"boxItem-wrap|productBoxes", title_class=r"item-name|title", price_class=r"product-box-prices|price", search_pattern="/?s={query}&post_type=product", fetch_methods=fetch_methods)
         elif engine == "prodbox_wineandmore":
             from src.scrapers.html_scrapers import ProdBoxScraper
-            return ProdBoxScraper(store, container_class=r"ProductItem|layout_list_item", title_class=r"title|name", price_class=r"price|product_quantity", search_pattern="/search?q={query}")
+            return ProdBoxScraper(store, container_class=r"ProductItem|layout_list_item", title_class=r"title|name", price_class=r"price|product_quantity", search_pattern="/search?q={query}", fetch_methods=fetch_methods)
         elif engine.startswith("playwright"):
             if not PLAYWRIGHT_AVAILABLE:
-                return HTMLFallbackScraper(store, search_pattern)
+                return HTMLFallbackScraper(store, search_pattern, fetch_methods=fetch_methods)
             from src.scrapers.playwright_scrapers import PwScraperFactory
             return PwScraperFactory.get_scraper(store)
         else:
-            return HTMLFallbackScraper(store, search_pattern)
+            return HTMLFallbackScraper(store, search_pattern, fetch_methods=fetch_methods)
     
     @staticmethod
     async def _scrape_one_store(
@@ -636,7 +762,12 @@ class UnifiedScraper:
     ) -> tuple[str, list]:
         """Scrape a single store. Returns (name, products).
 
-        For browser-based engines, acquires a semaphore slot before launching
+        Uses the per-store strategy from STORE_STRATEGIES to determine the
+        fetch method sequence. The strategy is looked up by domain and
+        strictly followed — e.g. ["curl_cffi", "playwright", "llm"] means:
+        try curl_cffi first, fall back to Playwright, then LLM extraction.
+
+        For browser-based methods, acquires a semaphore slot before launching
         the browser and releases it in a finally block — even on error.
 
         If a ``circuit_breaker`` dict is provided (per-search_all() state),
@@ -662,16 +793,34 @@ class UnifiedScraper:
             name, UnifiedScraper.DEFAULT_STORE_TIMEOUT
         )
 
-        is_browser = UnifiedScraper._is_browser_engine(engine)
+        # ── Per-store strategy lookup ───────────────────────────────────────
+        strategy = _get_store_strategy(url)
+        domain = _extract_domain(url)
+        is_api_store = "api" in strategy
+        is_browser_needed = UnifiedScraper._strategy_needs_browser(strategy)
 
-        # --- Browser semaphore ------------------------------------------------
-        if is_browser:
+        logger.info(
+            "🎯 Strategy for %s (%s): %s | engine=%s | browser=%s",
+            name, domain, strategy, engine, is_browser_needed,
+        )
+
+        # --- Browser semaphore (only if strategy includes playwright) -------
+        if is_browser_needed:
             logger.info(
                 "Browser scraper %s waiting for semaphore slot (concurrency=%d)",
                 name, browser_semaphore._value,
             )
             await browser_semaphore.acquire()
             logger.info("Browser scraper %s acquired semaphore slot", name)
+
+        # Determine fetch_methods for HTML scrapers:
+        # - Strip "api" (handled by the scraper class itself)
+        # - Strip "playwright" if the engine is already playwright-based
+        #   (the Playwright scraper class does its own browser rendering)
+        # - Keep "curl_cffi" and "llm" for HTML scrapers
+        # For playwright engines, the scraper handles browser internally,
+        # so fetch_methods is only relevant for HTML-based scrapers.
+        fetch_methods = [m for m in strategy if m != "api"]
 
         products = []
         error_msg = None
@@ -682,18 +831,21 @@ class UnifiedScraper:
             if run_id:
                 mark_store_running(run_id, query, name)
 
-            scraper = UnifiedScraper.get_scraper(name, url)
+            scraper = UnifiedScraper.get_scraper(name, url, fetch_methods=fetch_methods)
             products = await asyncio.wait_for(scraper.search(query), timeout=store_timeout)
 
-            # ── LLM Fallback: if standard scraping returned 0 valid products ──
-            # Only triggers when all standard methods failed to extract prices.
-            # Fetches the store's search page HTML and asks LLM to find prices.
-            if not products and engine not in UnifiedScraper.API_ENGINES:
-                logger.info("LLM fallback triggered for %s — standard scraping returned 0 products", name)
+            # ── LLM Fallback: if strategy includes "llm" and we got 0 products ─
+            # Only triggers when all prior methods in the strategy failed
+            # to extract prices. Fetches the store's search page HTML and
+            # asks LLM to find prices.
+            if not products and "llm" in strategy and not is_api_store:
+                logger.info("LLM fallback triggered for %s — all prior methods returned 0 products", name)
                 try:
                     from src.scrapers.html_scrapers import _fetch_html
+                    # For LLM fallback, try fetching HTML with any available method
+                    llm_fetch_methods = [m for m in strategy if m in ("curl_cffi", "playwright")]
                     search_url = url + pattern.replace("{query}", quote(query)) if pattern else f"{url}/?s={quote(query)}"
-                    raw_html = await _fetch_html(search_url, store_name=name)
+                    raw_html = await _fetch_html(search_url, store_name=name, methods=llm_fetch_methods)
                     if raw_html:
                         from src.utils.llm_price_fallback import llm_extract_price
                         fallback_price = llm_extract_price(query, raw_html, name)
@@ -763,7 +915,7 @@ class UnifiedScraper:
                 progress_callback(name, 0, f"❌ {type(e).__name__}")
         finally:
             # Always release the browser semaphore (if acquired) — even on error
-            if is_browser:
+            if is_browser_needed:
                 browser_semaphore.release()
                 logger.info("Browser scraper %s released semaphore slot", name)
 
@@ -771,8 +923,8 @@ class UnifiedScraper:
             if run_id and error_msg:
                 mark_store_error(run_id, query, name, error_msg)
             logger.info(
-                "%s done in %.1fs | products=%d | error=%s | engine=%s | browser=%s",
-                name, elapsed, len(products), error_msg or "none", engine, is_browser,
+                "%s done in %.1fs | products=%d | error=%s | engine=%s | strategy=%s | browser=%s",
+                name, elapsed, len(products), error_msg or "none", engine, strategy, is_browser_needed,
             )
 
             # --- Circuit breaker: update state after scrape -----------------
@@ -821,6 +973,8 @@ class UnifiedScraper:
         CIRCUIT_BREAKER_DB_LOOKBACK runs, it is pre-skipped with a warning.
         """
         # Split stores into API group (unlimited) and browser group (semaphore-limited)
+        # Classification is now based on the per-store strategy: if "playwright"
+        # is in the strategy, the store needs a browser slot.
         api_tasks = []
         browser_tasks = []
 
@@ -829,8 +983,8 @@ class UnifiedScraper:
             if engine == "haturki_api":
                 continue
 
-            # Defer semaphore creation to here so we get a fresh one per run
-            if UnifiedScraper._is_browser_engine(engine):
+            strategy = _get_store_strategy(url)
+            if UnifiedScraper._strategy_needs_browser(strategy):
                 browser_tasks.append((name, url, engine, pattern))
             else:
                 api_tasks.append((name, url, engine, pattern))
