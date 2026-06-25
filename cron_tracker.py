@@ -199,8 +199,9 @@ class SmartAnalyzer:
                 if key in seen:
                     continue
                 seen.add(key)
+                url_part = f" | [קישור לחנות]({deal['url']})" if deal.get("url") else ""
                 lines.append(
-                    f"💰 {deal['product']} — {deal['price']:.0f}₪ ב-{deal['store']} "
+                    f"💰 {deal['product']} — {deal['price']:.0f}₪ ב-{deal['store']}{url_part} "
                     f"(הטורקי {deal['turki_price']:.0f}₪, חיסכון {deal['savings_percent']:.0f}%)"
                 )
             elif dtype == "sale":
@@ -208,8 +209,9 @@ class SmartAnalyzer:
                 if key in seen:
                     continue
                 seen.add(key)
+                url_part = f" | [קישור לחנות]({deal['url']})" if deal.get("url") else ""
                 lines.append(
-                    f"🔥 מבצע! {deal['product']} ב-{deal['store']}: "
+                    f"🔥 מבצע! {deal['product']} ב-{deal['store']}{url_part}: "
                     f"{deal['price']:.0f}₪ (במקום {deal['regular_price']:.0f}₪, -{deal['discount_percent']:.0f}%)"
                 )
             elif dtype == "anomaly":

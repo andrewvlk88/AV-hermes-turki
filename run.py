@@ -368,8 +368,9 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
                     lines.append(f"   ⚠️ נפסל ע" + "י LLM: " + reason)
                 else:
                     lines.append(f"   💰 חיסכון: {savings:.0f}₪ ({pct:.0f}%)")
+                    url_part = f" | [קישור לחנות]({cheapest['url']})" if cheapest.get("url") else ""
                     deals.append(
-                        f"💰 {display_name} — {cheapest['price']:.0f}₪ ב-{cheapest['store']} "
+                        f"💰 {display_name} — {cheapest['price']:.0f}₪ ב-{cheapest['store']}{url_part} "
                         f"(הטורקי {turki_match['price']:.0f}₪, חיסכון {pct:.0f}%)"
                     )
         

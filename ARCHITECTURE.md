@@ -41,31 +41,27 @@ Two distinct scraping paths exist and are kept cleanly separated:
 
 ## 2. Scraper Hierarchy — API vs. Browser
 
-Scrapers are divided into three layers, each in its own module. The
-`UnifiedScraper` class in `unified_scraper.py` is the single dispatcher
-that picks the right scraper per store based on a per-store `engine`
-string in `STORE_CONFIGS`.
+Scrapers are divided into three layers, each in its own module. Fetching is now driven by three key enhancements (v2.12–v2.14):
+1. **curl_cffi Chrome TLS Impersonation**: Shifting away from standard `httpx` to `curl_cffi.AsyncSession` impersonating Chrome (JA3, HTTP/2). This provides extremely fast fetches (~200ms) that bypass basic Cloudflare/Akamai bot challenges without spinning up a browser.
+2. **Per-Store Scraping Strategy (`STORE_STRATEGIES`)**: Avoids hardcoded fallback chains. Maps each store domain to an optimized sequence of methods (e.g. `["curl_cffi", "playwright", "llm"]` or `["playwright", "llm"]`). Only runs the methods defined for that specific competitor.
+3. **Hard Store Enhanced Retries & Circuit Breaker**: Three problematic critical competitors (**paneco.co.il**, **the-importer.co.il**, **mashkaot.co.il**) get up to 5 retry attempts, longer base delay (8s), exponential backoff (x1.8), and a lower consecutive failure circuit breaker threshold (2 failures trips the breaker and skips the store for the current batch).
 
 ### Layer 1 — REST API scrapers (`api_scrapers.py` + `unified_scraper.py`)
 
-Pure HTTP (httpx), no browser. Fastest path.
+Pure HTTP (curl_cffi), no browser. Fastest path (~200ms per store).
 
 | Class | Module | Used for |
 |-------|--------|----------|
-| `HaturkiAPIScraper` | `api_scrapers.py` | הטורקי — custom REST API |
-| `WooCommerceAPIScraper` | `unified_scraper.py` | WooCommerce Store API stores |
-| `MagentoAPIScraper` | `unified_scraper.py` | Magento REST API stores (if used) |
-| `GenericAPIScraper` | `api_scrapers.py` | Legacy HTML-from-API fallback (rarely used) |
+| `HaturkiAPIScraper` | `api_scrapers.py` | הטורקי — custom REST API (curl_cffi) |
+| `WooCommerceAPIScraper` | `unified_scraper.py` | WooCommerce Store API stores (curl_cffi) |
+| `MagentoAPIScraper` | `unified_scraper.py` | Magento REST API stores (curl_cffi) |
+| `GenericAPIScraper` | `api_scrapers.py` | Legacy HTML-from-API fallback |
 
-These scrapers use **progressive querying**: first search by the first
-2 words of the query, then fall back to the first word alone. This
-bypasses strict server-side matching that returns 0 results for long
-Hebrew queries (especially with brand abbreviations like ק.ס).
+These scrapers use **progressive querying** (first 2 words, fallback to 1 word) to bypass rigid server-side matching.
 
 ### Layer 2 — HTML scrapers (`html_scrapers.py`)
 
-Fetch HTML (via CloakBrowser stealth fetch or httpx fallback) and parse
-with BeautifulSoup. No full JS render — just the static HTML.
+Fetch HTML using the store's designated strategy sequence via `_fetch_html()` and parse with BeautifulSoup.
 
 | Class | Used for |
 |-------|----------|
@@ -74,16 +70,11 @@ with BeautifulSoup. No full JS render — just the static HTML.
 | `ProdBoxScraper` | Generic `.prod-box` / `.products__block` structure (Drinks4U, אליאסי, לגימה) |
 | `HTMLFallbackScraper` (in `unified_scraper.py`) | Last-resort HTML fallback |
 
-The shared `_fetch_html()` helper in `html_scrapers.py` tries
-CloakBrowser first (to bypass Cloudflare/age popups) and falls back to
-plain httpx.
+The shared `_fetch_html()` helper in `html_scrapers.py` uses the designated `fetch_methods` list (e.g. `["curl_cffi", "playwright"]`) to sequence attempts.
 
 ### Layer 3 — Playwright/CloakBrowser scrapers (`playwright_scrapers.py`)
 
-Full headless Chromium via CloakBrowser (stealth Chromium with 58 C++
-fingerprint patches) or plain Playwright as fallback. Used for JS-heavy
-stores that load products dynamically or require interaction (age
-verification popups).
+Full headless Chromium via CloakBrowser (stealth Chromium with 58 C++ fingerprint patches) or Playwright fallback.
 
 | Class | Used for |
 |-------|----------|
@@ -95,11 +86,7 @@ verification popups).
 | `WineAndMoreScraper` | Wine & More — custom JS-heavy |
 | `PwScraperFactory` | Factory that returns the right Playwright scraper |
 
-**Key constraint:** CloakBrowser instantiates a full Chromium process
-per store. To avoid session lock files and memory exhaustion, browser
-stores are gated by an `asyncio.Semaphore(MAX_BROWSER_CONCURRENCY=3)` —
-at most 3 browser scrapers run in parallel. API stores (WooCommerce,
-Magento, Haturki) run concurrently with no limit. See §7 for details.
+**Key constraint:** Gated by `asyncio.Semaphore(MAX_BROWSER_CONCURRENCY=3)` to avoid memory exhaustion. Splitting into the browser queue is dynamically determined by checking if `"playwright"` is in the store's strategy sequence (`_strategy_needs_browser()`).
 
 ---
 
@@ -126,6 +113,11 @@ Magento, Haturki) run concurrently with no limit. See §7 for details.
 | 17 | Drinks4U | drinks4u.co.il | `prodbox_drinks4u` | HTML scraper (`.prod-box`) |
 | 18 | Alcohol123 | alcohol123.co.il | `woocommerce` | WooCommerce Store API |
 | 19 | בית היין | winehouse.co.il | `woocommerce` | WooCommerce Store API |
+| 20 | פרטוש משקאות | partush-mashkaot.co.il | `woocommerce` | WooCommerce Store API — **added in v2.14** |
+
+> סה"כ: **11 חנויות API** (1 REST + 10 WooCommerce) · **5 חנויות Browser** · **4 חנויות HTML fetch** — סה"כ 20 חנויות סריקה פעילות.
+
+---
 
 > **Note:** The `STORE_CONFIGS` list in `unified_scraper.py` is the
 > single source of truth for this table. It is auto-generated from
@@ -306,11 +298,10 @@ keyword matching if LLM is unavailable. Plans are cached in-memory for
 | Mechanism | Location | Purpose |
 |-----------|----------|---------|
 | Per-store hard timeout (90-120s) | `UnifiedScraper.STORE_TIMEOUTS` | One hanging store can't stall the whole run |
-| Browser concurrency limit (Semaphore) | `UnifiedScraper.search_all()` — `asyncio.Semaphore(3)` | At most 3 CloakBrowser/Playwright scrapers in parallel; avoids Chromium memory exhaustion and session lock contention. API stores run unlimited. |
+| Browser concurrency limit (Semaphore) | `UnifiedScraper.search_all()` — `asyncio.Semaphore(3)` | At most 3 browser-needed scrapers run in parallel. Classified dynamically using `_strategy_needs_browser()`. |
 | EPIPE / BrokenPipeError handling | `playwright_scrapers._is_epipe_error()` | Detects IPC pipe breaks from the Node.js Playwright driver in 3 forms: Python `BrokenPipeError`, `OSError` with `errno.EPIPE`/`ECONNRESET`, and string-form `"EPIPE"`/`"PipeTransport"` messages. |
-| Browser retry with exponential backoff | `playwright_scrapers._browser_retry()` | Retries transient browser ops (EPIPE, TimeoutError, ConnectionError) up to 3 attempts (4 for hard stores) with per-store backoff config via `_retry_config_for()`. Non-retriable errors propagate immediately. |
-| Smart retry for hard stores | `playwright_scrapers.HARD_STORES` + `_retry_config_for()` | Stores פאנקו, היבואן, שר המשקאות get 4 attempts (1+3 retries) with 5s base, 1.5x backoff — longer window for slow Cloudflare challenges. |
-| Circuit breaker (per-batch) | `UnifiedScraper._scrape_one_store()` + `circuit_breaker` dict | After N consecutive failures (default 2) within a search_all() batch, skip the store for remaining products. Fresh state per batch. |
+| Smart retry for hard stores | `html_scrapers.HARD_STORES` + `_get_retry_config()` | Stores פאנקו, היבואן, שר המשקאות get 5 attempts (1+4 retries) with 8s base, 1.8x backoff — longer window for slow Cloudflare challenges. |
+| Circuit breaker (per-batch) | `UnifiedScraper._scrape_one_store()` + `circuit_breaker` dict | After N consecutive failures (default 2, customized per store in `HARD_STORES`) within a batch, skip the store for remaining products. Fresh state per batch. |
 | Circuit breaker (DB pre-skip) | `sqlite_store.get_chronic_failure_stores()` | If a store failed in ALL of its last 3 runs (store_status table), pre-skip it at the start of search_all(). |
 | Separate browser timeouts (ms) | `playwright_scrapers.BROWSER_TIMEOUTS` | `navigation`=30s (page.goto/domcontentloaded). Separate from the API-level `STORE_TIMEOUTS` (90-120s) so browser and API phases are tuned independently. |
 | Guaranteed context cleanup | `GenericPlaywrightScraper.search()` | Outer `try/finally` closes browser context even on EPIPE; inner `try/finally` closes each page. Cleanup errors are swallowed so they never mask the original failure. |
@@ -324,11 +315,12 @@ keyword matching if LLM is unavailable. Plans are cached in-memory for
 | Progressive querying (WooCommerce/Magento) | API scrapers | Bypass strict server-side matching for Hebrew |
 | CloakBrowser non-persistent context | `playwright_scrapers._create_cloak_context()` | Avoid cookie/session interference between stores |
 | Age popup skip for Magento | `GenericPlaywrightScraper.search()` | Paneco/Importer age click caused wrong redirects |
+| Adaptive Scraping Frequency | `sqlite_store.get_query_price_stability()` | Skips scanning stable queries (no change in 30+ days) unless 24h passed since last successful scrape. |
+| Direct Deal Links | `run.py` + `cron_tracker.py` | If a competitor's price is 5%+ cheaper than Turki, appends a direct store product link `[קישור לחנות](url)` to the deal alert. |
 
 ### Concurrency Model in Detail
 
-`UnifiedScraper.search_all()` splits stores into two groups at dispatch
-time:
+`UnifiedScraper.search_all()` splits stores into two groups based on `_strategy_needs_browser(strategy)`:
 
 ```
 asyncio.gather(
@@ -337,12 +329,8 @@ asyncio.gather(
 )
 ```
 
-- **API group** (`woocommerce`, `magento`, `haturki_api`): lightweight
-  httpx calls, no concurrency limit.
-- **Browser group** (everything else — `playwright*`, `magento_html`,
-  `sar`, `prodbox_*`, HTML fallback): each `_scrape_one_store()` call
-  acquires the shared `asyncio.Semaphore(3)` before launching a browser
-  and releases it in a `finally` block — even on error.
+- **API group** (stores with strategies like `["api"]` or `["curl_cffi", "llm"]`): lightweight curl_cffi calls, no concurrency limit.
+- **Browser group** (stores with `"playwright"` in their strategy): each `_scrape_one_store()` call acquires the shared `asyncio.Semaphore(3)` before launching a browser and releases it in a `finally` block — even on error.
 
 A fresh `Semaphore` is created per `search_all()` call so a long-running
 run cannot bleed semaphore slots into the next one.

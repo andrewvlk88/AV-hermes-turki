@@ -125,6 +125,7 @@ STORE_STRATEGIES: dict[str, list[str]] = {
     "coffeco.co.il": ["curl_cffi", "llm"],
     "alcohol123.co.il": ["curl_cffi", "llm"],
     "winehouse.co.il": ["curl_cffi", "llm"],
+    "partush-mashkaot.co.il": ["curl_cffi", "llm"],
 
     # Cloudflare-protected Magento (curl_cffi → Playwright → LLM)
     "paneco.co.il": ["curl_cffi", "playwright", "llm"],
@@ -686,6 +687,7 @@ class UnifiedScraper:
         ("Drinks4U", "https://www.drinks4u.co.il", "prodbox_drinks4u", "/?s={query}&post_type=product"),
         ("Alcohol123", "https://www.alcohol123.co.il", "woocommerce", "/?s={query}&post_type=product"),
         ("בית היין", "https://www.winehouse.co.il", "woocommerce", "/?s={query}&post_type=product"),
+        ("פרטוש משקאות", "https://partush-mashkaot.co.il", "woocommerce", "/?s={query}&post_type=product"),
     ]
     
     @staticmethod
@@ -799,10 +801,23 @@ class UnifiedScraper:
         is_api_store = "api" in strategy
         is_browser_needed = UnifiedScraper._strategy_needs_browser(strategy)
 
-        logger.info(
-            "🎯 Strategy for %s (%s): %s | engine=%s | browser=%s",
-            name, domain, strategy, engine, is_browser_needed,
-        )
+        # ── Hard store detection ───────────────────────────────────────────
+        from src.scrapers.html_scrapers import _is_hard_store, _get_retry_config, HARD_STORES
+        is_hard = _is_hard_store(url)
+        hard_label = "🔴 HARD STORE" if is_hard else ""
+
+        if is_hard:
+            retry_cfg = _get_retry_config(url=url)
+            logger.info(
+                "🎯 Strategy for %s (%s): %s | engine=%s | browser=%s | %s | retries=%d base_delay=%ds backoff=×%.1f",
+                name, domain, strategy, engine, is_browser_needed,
+                hard_label, retry_cfg["max_attempts"], retry_cfg["base_delay"], retry_cfg["backoff_factor"],
+            )
+        else:
+            logger.info(
+                "🎯 Strategy for %s (%s): %s | engine=%s | browser=%s",
+                name, domain, strategy, engine, is_browser_needed,
+            )
 
         # --- Browser semaphore (only if strategy includes playwright) -------
         if is_browser_needed:
@@ -931,16 +946,25 @@ class UnifiedScraper:
             if circuit_breaker is not None:
                 if succeeded:
                     # Reset on success — a single good scrape clears the slate.
+                    was_tripped = circuit_breaker.get(name, {}).get("tripped", False)
                     circuit_breaker[name] = {"failures": 0, "tripped": False}
+                    if was_tripped:
+                        logger.info("✅ Circuit breaker RECOVERED for %s — back in action", name)
                 else:
                     failures = circuit_breaker.get(name, {}).get("failures", 0) + 1
-                    tripped = failures >= UnifiedScraper.CIRCUIT_BREAKER_THRESHOLD
+                    # Use hard-store threshold if this is a hard store, otherwise default
+                    if is_hard:
+                        from src.scrapers.html_scrapers import _get_retry_config
+                        cb_threshold = _get_retry_config(url=url).get("circuit_breaker_threshold", UnifiedScraper.CIRCUIT_BREAKER_THRESHOLD)
+                    else:
+                        cb_threshold = UnifiedScraper.CIRCUIT_BREAKER_THRESHOLD
+                    tripped = failures >= cb_threshold
                     circuit_breaker[name] = {"failures": failures, "tripped": tripped}
                     if tripped:
                         logger.warning(
-                            "🔌 Circuit breaker tripped for %s after %d consecutive failures "
-                            "— skipping for remaining products",
-                            name, failures,
+                            "🔌 Circuit breaker TRIPPED for %s after %d consecutive failures "
+                            "(threshold=%d) — skipping for remaining products",
+                            name, failures, cb_threshold,
                         )
 
         return name, products

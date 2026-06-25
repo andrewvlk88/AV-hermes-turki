@@ -41,103 +41,289 @@ _CFFI_HEADERS = {
 }
 
 
-async def _fetch_html_cffi(url: str, store_name: str = None) -> Optional[str]:
+# ════════════════════════════════════════════════════════════════════
+#  Hard Stores — Enhanced Retry & Circuit Breaker Configuration
+# ════════════════════════════════════════════════════════════════════
+#
+# These three competitors are the most problematic in the Israeli alcohol
+# price intelligence landscape. They require stronger retry logic and
+# dedicated circuit breaker handling to maintain reliability.
+#
+# Adding a new hard store is as simple as adding its domain here.
+#
+# Settings:
+#   max_attempts: Total fetch attempts before giving up
+#   base_delay:   Initial delay in seconds before first retry
+#   backoff_factor: Multiplier for exponential backoff (delay × factor^n)
+#   circuit_breaker_threshold: Consecutive failures before skipping store
+
+HARD_STORES: dict[str, dict] = {
+    "paneco.co.il": {
+        "max_attempts": 5,
+        "base_delay": 8,
+        "backoff_factor": 1.8,
+        "circuit_breaker_threshold": 2,
+    },
+    "the-importer.co.il": {
+        "max_attempts": 5,
+        "base_delay": 8,
+        "backoff_factor": 1.8,
+        "circuit_breaker_threshold": 2,
+    },
+    "mashkaot.co.il": {
+        "max_attempts": 5,
+        "base_delay": 8,
+        "backoff_factor": 1.8,
+        "circuit_breaker_threshold": 2,
+    },
+}
+
+# Default retry settings for non-hard stores
+DEFAULT_RETRY = {
+    "max_attempts": 3,
+    "base_delay": 2,
+    "backoff_factor": 2.0,
+}
+
+
+def _get_retry_config(store_name: str = None, url: str = None) -> dict:
+    """Look up retry configuration for a store.
+
+    Checks if the store domain matches a HARD_STORES entry. If so, returns
+    the enhanced retry settings. Otherwise returns DEFAULT_RETRY.
+    """
+    if url:
+        from urllib.parse import urlparse
+        parsed = urlparse(url if "://" in url else f"https://{url}")
+        host = parsed.netloc or parsed.path
+        host = host.split(":")[0]
+        if host.startswith("www."):
+            host = host[4:]
+        domain = host.lower()
+        if domain in HARD_STORES:
+            return HARD_STORES[domain]
+    return DEFAULT_RETRY
+
+
+def _is_hard_store(url: str) -> bool:
+    """Check if a URL belongs to a hard store that needs enhanced retry logic."""
+    cfg = _get_retry_config(url=url)
+    return cfg is not DEFAULT_RETRY
+
+
+async def _fetch_html_cffi(
+    url: str,
+    store_name: str = None,
+    retry_config: dict = None,
+) -> Optional[str]:
     """Fetch HTML using curl_cffi with Chrome TLS impersonation.
 
     This is the primary fetching method. curl_cffi sends a real Chrome TLS
     fingerprint (JA3, HTTP/2 settings, ALPN) so most bot protections let it
-    through without challenging. Uses tenacity for retry on transient errors.
+    through without challenging.
+
+    Args:
+        url: URL to fetch.
+        store_name: Store name for logging.
+        retry_config: Dict with 'max_attempts', 'base_delay', 'backoff_factor'.
+            If None, uses DEFAULT_RETRY (3 attempts, 2s base, 2x backoff).
+            Hard stores (paneco, importer, mashkaot) pass stronger settings.
     """
     if not CFFI_AVAILABLE:
         return None
 
-    from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception_type
+    if retry_config is None:
+        retry_config = DEFAULT_RETRY
 
-    try:
-        async with cffi_requests.AsyncSession(impersonate="chrome") as session:
-            retrying = AsyncRetrying(
-                stop=stop_after_attempt(3),
-                wait=wait_exponential(multiplier=1, min=2, max=8),
-                reraise=True,
-            )
-            async for attempt in retrying:
-                with attempt:
-                    resp = await session.get(
-                        url,
-                        headers=_CFFI_HEADERS,
-                        timeout=15,
-                        allow_redirects=True,
-                    )
-                    if resp.status_code == 200:
-                        text = resp.text
-                        if text and len(text) > 200:
-                            logger.debug("curl_cffi SUCCESS for %s (%d chars)", store_name or url, len(text))
-                            return text
+    max_attempts = retry_config.get("max_attempts", 3)
+    base_delay = retry_config.get("base_delay", 2)
+    backoff_factor = retry_config.get("backoff_factor", 2.0)
+
+    is_hard = _is_hard_store(url)
+    domain_label = f"[{_extract_domain_simple(url)}]" if is_hard else ""
+
+    for attempt_num in range(1, max_attempts + 1):
+        try:
+            async with cffi_requests.AsyncSession(impersonate="chrome") as session:
+                resp = await session.get(
+                    url,
+                    headers=_CFFI_HEADERS,
+                    timeout=15,
+                    allow_redirects=True,
+                )
+                if resp.status_code == 200:
+                    text = resp.text
+                    if text and len(text) > 200:
+                        if is_hard:
+                            logger.info(
+                                "%s [curl_cffi] Attempt %d/%d | Status: Success (%d chars)",
+                                domain_label, attempt_num, max_attempts, len(text),
+                            )
                         else:
-                            logger.warning("curl_cffi got 200 but body too short for %s (%d chars)", store_name or url, len(text) if text else 0)
-                            return None
+                            logger.debug("curl_cffi SUCCESS for %s (%d chars)", store_name or url, len(text))
+                        return text
                     else:
-                        logger.warning("curl_cffi got status %d for %s", resp.status_code, store_name or url)
-                        # Non-200 — don't retry, just return None
+                        logger.warning(
+                            "%s [curl_cffi] Attempt %d/%d | Status: Failed (body too short: %d chars)",
+                            domain_label, attempt_num, max_attempts, len(text) if text else 0,
+                        )
+                else:
+                    logger.warning(
+                        "%s [curl_cffi] Attempt %d/%d | Status: Failed (HTTP %d)",
+                        domain_label, attempt_num, max_attempts, resp.status_code,
+                    )
+                    # Non-200 from Cloudflare-protected sites — retry, might be a challenge
+                    if not is_hard:
                         return None
-    except Exception as e:
-        logger.warning("curl_cffi failed for %s: %s", store_name or url, e)
-        return None
+        except Exception as e:
+            logger.warning(
+                "%s [curl_cffi] Attempt %d/%d | Status: Failed (%s)",
+                domain_label, attempt_num, max_attempts, e,
+            )
+
+        # Don't sleep after the last attempt
+        if attempt_num < max_attempts:
+            delay = base_delay * (backoff_factor ** (attempt_num - 1))
+            logger.info(
+                "%s [curl_cffi] Retrying in %.1fs (attempt %d/%d)...",
+                domain_label, delay, attempt_num + 1, max_attempts,
+            )
+            await asyncio.sleep(delay)
+
+    logger.warning(
+        "%s [curl_cffi] All %d attempts exhausted",
+        domain_label, max_attempts,
+    )
+    return None
 
 
-async def _fetch_html_playwright(url: str, store_name: str = None) -> Optional[str]:
+def _extract_domain_simple(url: str) -> str:
+    """Extract domain from URL (lightweight, for logging in hard-store retries)."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    host = parsed.netloc or parsed.path
+    host = host.split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host.lower()
+
+
+async def _fetch_html_playwright(
+    url: str,
+    store_name: str = None,
+    retry_config: dict = None,
+) -> Optional[str]:
     """Fetch HTML using CloakBrowser (stealth Chromium).
 
     This is the browser fallback when curl_cffi can't get through (e.g.,
     JS-rendered pages, age-gate popups, advanced Cloudflare challenges).
+
+    Args:
+        url: URL to fetch.
+        store_name: Store name for logging.
+        retry_config: Dict with 'max_attempts', 'base_delay', 'backoff_factor'.
+            If None, uses DEFAULT_RETRY. Hard stores get stronger settings.
     """
-    try:
-        from src.scrapers.playwright_scrapers import CLOAK_AVAILABLE, _create_cloak_context
-        if not CLOAK_AVAILABLE:
-            return None
+    if retry_config is None:
+        retry_config = DEFAULT_RETRY
 
-        browser = await _create_cloak_context(store_name=store_name)
-        page = await browser.new_page()
+    max_attempts = retry_config.get("max_attempts", 3)
+    base_delay = retry_config.get("base_delay", 2)
+    backoff_factor = retry_config.get("backoff_factor", 2.0)
+
+    is_hard = _is_hard_store(url)
+    domain_label = f"[{_extract_domain_simple(url)}]" if is_hard else ""
+
+    for attempt_num in range(1, max_attempts + 1):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            # Bypass age popup via JS click
+            from src.scrapers.playwright_scrapers import CLOAK_AVAILABLE, _create_cloak_context
+            if not CLOAK_AVAILABLE:
+                return None
+
+            browser = await _create_cloak_context(store_name=store_name)
+            page = await browser.new_page()
             try:
-                await page.evaluate('''() => {
-                    const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
-                    for (const el of document.querySelectorAll('a, button, input')) {
-                        const t = el.textContent.trim();
-                        if (keywords.some(k => t.includes(k))) { el.click(); break; }
-                    }
-                    const selectors = [
-                        '[id*="age_popup"]', '[id*="popup18plus"]', '[id*="wrapper_age"]',
-                        '[id*="active_popup"]', '.age-overlay', '.modal-backdrop',
-                        '.modal-overlay', '.popup-overlay'
-                    ];
-                    selectors.forEach(sel => {
-                        document.querySelectorAll(sel).forEach(el => el.remove());
-                    });
-                    document.body.classList.remove('modal-open');
-                    document.body.style.overflow = 'auto';
-                }''')
-                await asyncio.sleep(1)
-            except:
-                pass
-            await asyncio.sleep(3)
-            return await page.content()
-        except Exception as e:
-            logger.warning("CloakBrowser fetch failed for %s: %s", store_name or url, e)
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                # Bypass age popup via JS click
+                try:
+                    await page.evaluate('''() => {
+                        const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
+                        for (const el of document.querySelectorAll('a, button, input')) {
+                            const t = el.textContent.trim();
+                            if (keywords.some(k => t.includes(k))) { el.click(); break; }
+                        }
+                        const selectors = [
+                            '[id*="age_popup"]', '[id*="popup18plus"]', '[id*="wrapper_age"]',
+                            '[id*="active_popup"]', '.age-overlay', '.modal-backdrop',
+                            '.modal-overlay', '.popup-overlay'
+                        ];
+                        selectors.forEach(sel => {
+                            document.querySelectorAll(sel).forEach(el => el.remove());
+                        });
+                        document.body.classList.remove('modal-open');
+                        document.body.style.overflow = 'auto';
+                    }''')
+                    await asyncio.sleep(1)
+                except:
+                    pass
+                await asyncio.sleep(3)
+                content = await page.content()
+                if content and len(content) > 200:
+                    if is_hard:
+                        logger.info(
+                            "%s [playwright] Attempt %d/%d | Status: Success (%d chars)",
+                            domain_label, attempt_num, max_attempts, len(content),
+                        )
+                    return content
+                else:
+                    logger.warning(
+                        "%s [playwright] Attempt %d/%d | Status: Failed (content too short)",
+                        domain_label, attempt_num, max_attempts,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "%s [playwright] Attempt %d/%d | Status: Failed (%s)",
+                    domain_label, attempt_num, max_attempts, e,
+                )
+            finally:
+                try:
+                    await page.close()
+                except:
+                    pass
+                try:
+                    await browser.close()
+                except:
+                    pass
+        except ImportError:
             return None
-        finally:
-            await page.close()
-            await browser.close()
-    except ImportError:
-        return None
-    except Exception as e:
-        logger.warning("Playwright fallback error for %s: %s", store_name or url, e)
-        return None
+        except Exception as e:
+            logger.warning(
+                "%s [playwright] Attempt %d/%d | Status: Failed (%s)",
+                domain_label, attempt_num, max_attempts, e,
+            )
+
+        # Don't sleep after the last attempt
+        if attempt_num < max_attempts:
+            delay = base_delay * (backoff_factor ** (attempt_num - 1))
+            logger.info(
+                "%s [playwright] Retrying in %.1fs (attempt %d/%d)...",
+                domain_label, delay, attempt_num + 1, max_attempts,
+            )
+            await asyncio.sleep(delay)
+
+    logger.warning(
+        "%s [playwright] All %d attempts exhausted",
+        domain_label, max_attempts,
+    )
+    return None
 
 
-async def _fetch_html(url: str, store_name: str = None, methods: list = None) -> Optional[str]:
+async def _fetch_html(
+    url: str,
+    store_name: str = None,
+    methods: list = None,
+    retry_config: dict = None,
+) -> Optional[str]:
     """Fetch HTML using a per-store strategy-driven fallback chain.
 
     Args:
@@ -149,6 +335,8 @@ async def _fetch_html(url: str, store_name: str = None, methods: list = None) ->
             - "llm"        — Fetch via any available method, caller handles LLM extraction
         If ``methods`` is None, defaults to ["curl_cffi", "playwright"]
         (LLM fallback is handled by the caller, not this function).
+        retry_config: Dict with 'max_attempts', 'base_delay', 'backoff_factor'.
+            If None, auto-detects from HARD_STORES or uses DEFAULT_RETRY.
 
     Returns:
         HTML string on success, None if all methods fail.
@@ -156,14 +344,18 @@ async def _fetch_html(url: str, store_name: str = None, methods: list = None) ->
     if methods is None:
         methods = ["curl_cffi", "playwright"]
 
+    # Auto-detect retry config from HARD_STORES if not explicitly provided
+    if retry_config is None:
+        retry_config = _get_retry_config(store_name=store_name, url=url)
+
     for method in methods:
         if method == "curl_cffi":
-            html_text = await _fetch_html_cffi(url, store_name)
+            html_text = await _fetch_html_cffi(url, store_name, retry_config=retry_config)
             if html_text:
                 return html_text
             logger.info("curl_cffi failed for %s — trying next method", store_name or url)
         elif method == "playwright":
-            html_text = await _fetch_html_playwright(url, store_name)
+            html_text = await _fetch_html_playwright(url, store_name, retry_config=retry_config)
             if html_text:
                 return html_text
             logger.info("playwright failed for %s — trying next method", store_name or url)
