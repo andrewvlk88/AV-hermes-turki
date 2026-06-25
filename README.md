@@ -143,7 +143,38 @@ python run.py "וודקה בלוגה ליטר"
 
 # הרצה מושתקת עם פלט JSON נקי (מיועד לעוזרים אישיים/בוטים של AI)
 python run.py "בלוגה" --agent-mode
+
+# הרצה ב-Fast Mode — בלי דפדפנים בכלל (ראה סעיף Fast Mode למטה)
+python run.py "גבעות מרלו 2022" --fast
 ```
+
+### Fast Mode (v2.14+)
+
+**מה זה:** מצב שמבטל לחלוטין את כל שיטות הסריקה מבוססות-דפדפן (Playwright/CloakBrowser). רק API, curl_cffi, ו-LLM fallback פעילים. מונע תקיעות בחנויות כבדות.
+
+**מתי להשתמש:**
+- כשהריצה הרגילה נתקעת או לוקחת יותר מ-5 דקות
+- כשרוצים תוצאות מהירות (~30-60 שניות במקום 5-10 דקות)
+- בבדיקות מהירות של מחירים ללא צורך בחנויות JS-heavy
+
+**איך מפעילים:**
+```bash
+# דרך CLI
+python run.py "וודקה בלוגה ליטר" --fast
+
+# דרך environment variable
+FAST_MODE=true python run.py "וודקה בלוגה ליטר"
+```
+
+**מה קורה ב-Fast Mode:**
+- כל ה-strategies מקבלות `"playwright"` מוסר מהן (עותק חדש, המקור לא משתנה)
+- חנויות שנשארות עם strategy ריק → מדלגות עם לוג `[⏩ FAST MODE] Skipping`
+- חנויות playwright עם curl_cffi ב-strategy → מנסות curl_cffi בלבד
+- לא נשלחים תהליכי Chromium בכלל → אין EPIPE, אין תקיעות
+- `PlaywrightEngine.close()` לא נקרא (אין מה לסגור)
+
+**חנויות שעובדות ב-Fast Mode (11):** כל חנויות WooCommerce API + פרטוש + הטורקי
+**חנויות שמדלגות/מנסות curl_cffi (8):** פאנקו, היבואן, מנו וינו, אביב, Wine & More, שר המשקאות, אליאסי, לגימה, Drinks4U
 
 ### 3. דשבורד חי (`dashboard.py`)
 

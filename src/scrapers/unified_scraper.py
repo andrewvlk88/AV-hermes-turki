@@ -144,6 +144,48 @@ STORE_STRATEGIES: dict[str, list[str]] = {
 # Default fallback strategy for unknown domains
 DEFAULT_STRATEGY = ["curl_cffi", "playwright", "llm"]
 
+# ── Fast Mode ──────────────────────────────────────────────────────────
+# When active, all "playwright" methods are stripped from strategy lists
+# at runtime. Stores that become empty after stripping are skipped entirely.
+# Activated via env var FAST_MODE=true or CLI flag --fast.
+import os as _os
+FAST_MODE = _os.environ.get("FAST_MODE", "").lower() in ("true", "1", "yes")
+
+def _build_fast_strategies() -> dict[str, list[str]]:
+    """Build a filtered copy of STORE_STRATEGIES with playwright removed.
+
+    Does NOT mutate the original STORE_STRATEGIES dict.
+    Stores whose strategy becomes empty after removing playwright are
+    omitted from the result (they'll be skipped at runtime).
+
+    Returns a new dict with only non-empty strategies.
+    """
+    filtered = {}
+    for domain, methods in STORE_STRATEGIES.items():
+        fast_methods = [m for m in methods if m != "playwright"]
+        if fast_methods:
+            filtered[domain] = fast_methods
+    return filtered
+
+def _get_active_strategies() -> dict[str, list[str]]:
+    """Return the strategies dict to use for this run.
+
+    In Fast Mode: returns a filtered copy without playwright.
+    In normal mode: returns the original STORE_STRATEGIES.
+    """
+    if FAST_MODE:
+        return _build_fast_strategies()
+    return STORE_STRATEGIES
+
+def _get_active_default_strategy() -> list[str]:
+    """Return the default strategy for unknown domains.
+
+    In Fast Mode: strips playwright from DEFAULT_STRATEGY.
+    """
+    if FAST_MODE:
+        return [m for m in DEFAULT_STRATEGY if m != "playwright"]
+    return DEFAULT_STRATEGY
+
 
 def _extract_domain(url: str) -> str:
     """Extract the registrable domain from a store URL.
@@ -169,10 +211,16 @@ def _get_store_strategy(url: str) -> list[str]:
     """Look up the scraping strategy for a store URL.
 
     Extracts the domain from the URL and returns the method sequence
-    from STORE_STRATEGIES. Falls back to DEFAULT_STRATEGY for unknown domains.
+    from the active strategies dict. Falls back to the active default
+    strategy for unknown domains.
+
+    In Fast Mode, the active strategies have "playwright" stripped out,
+    and the default strategy is ["curl_cffi", "llm"].
     """
     domain = _extract_domain(url)
-    strategy = STORE_STRATEGIES.get(domain, DEFAULT_STRATEGY)
+    active_strategies = _get_active_strategies()
+    active_default = _get_active_default_strategy()
+    strategy = active_strategies.get(domain, active_default)
     return strategy
 
 
@@ -743,6 +791,15 @@ class UnifiedScraper:
             from src.scrapers.html_scrapers import ProdBoxScraper
             return ProdBoxScraper(store, container_class=r"ProductItem|layout_list_item", title_class=r"title|name", price_class=r"price|product_quantity", search_pattern="/search?q={query}", fetch_methods=fetch_methods)
         elif engine.startswith("playwright"):
+            # In Fast Mode, fall back to HTMLFallbackScraper with curl_cffi
+            # instead of launching a browser
+            from src.scrapers.unified_scraper import FAST_MODE
+            if FAST_MODE:
+                logger.info(
+                    "[⏩ FAST MODE] %s: using HTMLFallbackScraper instead of Playwright",
+                    name,
+                )
+                return HTMLFallbackScraper(store, search_pattern, fetch_methods=fetch_methods)
             if not PLAYWRIGHT_AVAILABLE:
                 return HTMLFallbackScraper(store, search_pattern, fetch_methods=fetch_methods)
             from src.scrapers.playwright_scrapers import PwScraperFactory
@@ -973,6 +1030,11 @@ class UnifiedScraper:
     async def search_all(query: str, progress_callback=None, run_id: str = None) -> dict:
         """Search ALL stores with smart concurrency control.
 
+        In **Fast Mode** (activated via `FAST_MODE=true` env var or `--fast`
+        CLI flag), all "playwright" methods are stripped from strategies.
+        Stores that become empty (playwright-only) are skipped with a
+        clear log message. No browser is launched at all.
+
         Strategy:
         - API-based stores (WooCommerce, Magento, Turki API) run concurrently
           with NO limit — they're lightweight HTTP calls.
@@ -996,11 +1058,24 @@ class UnifiedScraper:
         table for chronic failures: if a store failed in ALL of its last
         CIRCUIT_BREAKER_DB_LOOKBACK runs, it is pre-skipped with a warning.
         """
+        # ── Fast Mode banner ─────────────────────────────────────────────
+        from src.scrapers.unified_scraper import FAST_MODE
+        if FAST_MODE:
+            logger.info(
+                "🚀 Fast Mode is ACTIVE — Browser scraping is disabled. "
+                "Only API, curl_cffi, and LLM methods will be used."
+            )
+            if progress_callback:
+                progress_callback("FAST_MODE", 0, "🚀 Fast Mode ACTIVE — no browsers")
+
         # Split stores into API group (unlimited) and browser group (semaphore-limited)
         # Classification is now based on the per-store strategy: if "playwright"
         # is in the strategy, the store needs a browser slot.
+        # In Fast Mode, playwright is stripped, so all stores go to the API group
+        # (or are skipped entirely if their strategy becomes empty).
         api_tasks = []
         browser_tasks = []
+        skipped_fast = []
 
         for name, url, engine, pattern in UnifiedScraper.STORE_CONFIGS:
             # Haturki excluded (already handled separately in run.py)
@@ -1008,6 +1083,20 @@ class UnifiedScraper:
                 continue
 
             strategy = _get_store_strategy(url)
+
+            # Fast Mode: skip stores with empty strategy (playwright-only)
+            if FAST_MODE and not strategy:
+                domain = _extract_domain(url)
+                logger.warning(
+                    "[⏩ FAST MODE] Skipping '%s' - Store requires Playwright "
+                    "which is disabled in Fast Mode.",
+                    domain,
+                )
+                if progress_callback:
+                    progress_callback(name, 0, "⏩ skipped (fast mode)")
+                skipped_fast.append(name)
+                continue
+
             if UnifiedScraper._strategy_needs_browser(strategy):
                 browser_tasks.append((name, url, engine, pattern))
             else:
@@ -1015,8 +1104,9 @@ class UnifiedScraper:
 
         total_stores = len(api_tasks) + len(browser_tasks)
         logger.info(
-            "search_all: %d stores | API(unlimited)=%d | Browser(semaphore=%d)=%d",
+            "search_all: %d stores | API(unlimited)=%d | Browser(semaphore=%d)=%d%s",
             total_stores, len(api_tasks), UnifiedScraper.MAX_BROWSER_CONCURRENCY, len(browser_tasks),
+            f" | ⏩ {len(skipped_fast)} skipped (Fast Mode)" if FAST_MODE else "",
         )
 
         # --- Circuit Breaker: fresh state per batch --------------------------

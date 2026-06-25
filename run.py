@@ -7,6 +7,8 @@ from typing import List
 from datetime import datetime
 import logging
 
+logger = logging.getLogger("turk_pi.run")
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.models import PriceReport, ProductPrice
@@ -529,7 +531,15 @@ async def async_main(queries: List[str], output_dir: str = "data"):
             _print(f"\n{format_telegram(report)}")
     finally:
         # Always close Playwright browser to prevent zombie Chromium processes
-        await PlaywrightEngine.close()
+        # In Fast Mode, no browser was launched, so skip cleanup entirely
+        from src.scrapers.unified_scraper import FAST_MODE
+        if not FAST_MODE:
+            try:
+                await asyncio.wait_for(PlaywrightEngine.close(), timeout=30)
+            except Exception:
+                logger.exception("Failed to close PlaywrightEngine cleanly")
+        else:
+            logger.info("Fast Mode: skipping PlaywrightEngine cleanup (no browser was launched)")
     
     return last_report
 
@@ -552,6 +562,7 @@ def main():
     Parses command-line arguments, configures silent/JSON output modes,
     and runs ``async_main`` for all provided queries. Supports
     ``--agent-mode`` (implies --json --silent) for AI agent consumption.
+    ``--fast`` enables Fast Mode (no browser scraping).
     """
     parser = argparse.ArgumentParser(description="טורקי פרייס אינטליג׳נס")
     parser.add_argument("queries", nargs="+", help='מוצרים: "ג\'ק דניאלס" "וודקה אבסולוט"')
@@ -559,6 +570,7 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout (implies --silent)")
     parser.add_argument("--silent", action="store_true", help="Suppress progress output to stdout")
     parser.add_argument("--agent-mode", action="store_true", help="Alias for --json --silent (for Agent consumption)")
+    parser.add_argument("--fast", action="store_true", help="Fast Mode: disable all browser scraping (Playwright/CloakBrowser). Only API, curl_cffi, and LLM methods are used.")
     
     args = parser.parse_args()
     
@@ -570,6 +582,15 @@ def main():
     
     global SILENT
     SILENT = args.silent
+    
+    # ── Fast Mode activation ──────────────────────────────────────────
+    # CLI flag takes precedence; also checks env var FAST_MODE=true
+    if args.fast:
+        import src.scrapers.unified_scraper as _us
+        _us.FAST_MODE = True
+        if not SILENT:
+            print("🚀 Fast Mode is ACTIVE — Browser scraping is disabled. "
+                  "Only API, curl_cffi, and LLM methods will be used.")
     
     report = asyncio.run(async_main(args.queries, args.output))
     
