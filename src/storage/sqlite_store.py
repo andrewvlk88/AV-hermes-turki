@@ -432,3 +432,142 @@ def get_chronic_failure_stores(store_names: List[str], lookback: int = 3) -> set
         if len(rows) >= lookback and all(r.get("status") == "error" for r in rows):
             chronic.add(name)
     return chronic
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Adaptive scraping frequency — price stability analysis
+# ════════════════════════════════════════════════════════════════════
+
+def get_query_price_stability(query: str) -> Optional[Dict[str, Any]]:
+    """Analyze price stability for a tracked query across its scan history.
+
+    Examines the ``price_history`` table to determine:
+    - When the price last changed (best price per run = min of regular/sale)
+    - When the last successful scrape occurred (most recent run_id)
+    - How many distinct best-price points exist in the last 30 days
+
+    Groups price_history rows by ``run_id`` (one scrape = one run), computes
+    the best (minimum) price across all stores for each run, and then detects
+    changes between consecutive runs. This avoids false positives from
+    multiple stores reporting different prices within the same scrape.
+
+    This powers the adaptive scraping frequency mechanism in the Orchestrator:
+    queries whose price hasn't changed in 30+ days are skipped (unless 24h
+    have passed since the last scrape), while queries with recent price
+    changes are scraped on every run.
+
+    Args:
+        query: The tracked query string (e.g., "וודקה בלוגה ליטר").
+            Matches against ``price_history.query``.
+
+    Returns:
+        Dict with keys:
+            - ``query``: the query string
+            - ``last_price_change``: ISO timestamp of the most recent price
+              change, or ``None`` if no change detected / no history.
+            - ``last_scrape_at``: ISO timestamp of the most recent
+              price_history row for this query.
+            - ``days_since_change``: int days since last price change,
+              or ``None`` if no history.
+            - ``days_since_scrape``: int days since last scrape,
+              or ``None`` if no history.
+            - ``distinct_prices_30d``: number of distinct best-price values
+              in the last 30 days (1 = completely stable).
+            - ``total_history_rows``: total price_history rows for this query.
+        Returns ``None`` if the query has no history at all.
+    """
+    conn = get_db()
+    try:
+        # Group by run_id — one scrape = one run. For each run, find the
+        # best (minimum) price across all stores. This is the "deal price"
+        # that actually matters for change detection.
+        rows = conn.execute(
+            """
+            SELECT run_id,
+                   MIN(CASE
+                       WHEN sale_price IS NOT NULL AND sale_price > 0
+                            AND (regular_price IS NULL OR sale_price < regular_price)
+                       THEN sale_price
+                       WHEN regular_price IS NOT NULL AND regular_price > 0
+                       THEN regular_price
+                   END) AS best_price,
+                   MAX(recorded_at) AS run_timestamp
+            FROM price_history
+            WHERE query = ?
+              AND (regular_price > 0 OR sale_price > 0)
+            GROUP BY run_id
+            ORDER BY run_timestamp ASC
+            """,
+            (query,),
+        ).fetchall()
+
+        if not rows:
+            return None
+
+        # Build a timeline of (best_price, timestamp) per run
+        runs = []
+        for row in rows:
+            if row["best_price"] is not None:
+                runs.append((row["best_price"], row["run_timestamp"]))
+
+        if not runs:
+            return None
+
+        # Find the last time the best price changed between consecutive runs
+        last_change_at = None
+        for i in range(1, len(runs)):
+            if runs[i][0] != runs[i - 1][0]:
+                last_change_at = runs[i][1]
+
+        # If no change was ever detected, the price has been stable since
+        # the first recorded scrape
+        if last_change_at is None:
+            last_change_at = runs[0][1]
+
+        last_scrape_at = runs[-1][1]
+
+        # Count distinct best prices in the last 30 days
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff_30d = (_dt.now() - _td(days=30)).isoformat()
+        distinct_30d = len({
+            p for p, ts in runs
+            if ts >= cutoff_30d
+        })
+
+        # Calculate days since each event
+        now = _dt.now()
+        def _days_since(ts_str: str) -> Optional[int]:
+            try:
+                # SQLite timestamps are "YYYY-MM-DD HH:MM:SS" — parse it
+                dt = _dt.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
+                return (now - dt).days
+            except (ValueError, TypeError):
+                try:
+                    dt = _dt.fromisoformat(ts_str[:19])
+                    return (now - dt).days
+                except (ValueError, TypeError):
+                    return None
+
+        # Total raw rows (not just grouped runs)
+        total_rows = conn.execute(
+            "SELECT COUNT(*) FROM price_history WHERE query = ?",
+            (query,),
+        ).fetchone()[0]
+
+        return {
+            "query": query,
+            "last_price_change": last_change_at,
+            "last_scrape_at": last_scrape_at,
+            "days_since_change": _days_since(last_change_at),
+            "days_since_scrape": _days_since(last_scrape_at),
+            "distinct_prices_30d": distinct_30d,
+            "total_history_rows": total_rows,
+        }
+    except Exception as e:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "get_query_price_stability failed for %r: %s", query, e
+        )
+        return None
+    finally:
+        conn.close()

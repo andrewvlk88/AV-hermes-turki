@@ -4,6 +4,10 @@
 # SQLite3 is built-in to Python stdlib (no pip install needed)
 
 # HTTP / Scraping
+# curl_cffi is the primary HTTP client — impersonates Chrome TLS fingerprint
+# to bypass basic bot protections (Cloudflare, Akamai, PerimeterX).
+# Falls back to Playwright (CloakBrowser) if curl_cffi fails, then LLM fallback.
+curl_cffi>=0.7.0
 requests>=2.31.0
 httpx>=0.26.0
 beautifulsoup4>=4.12.0

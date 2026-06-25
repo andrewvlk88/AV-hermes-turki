@@ -5,7 +5,6 @@ import asyncio
 import urllib.parse
 from typing import List, Optional
 from bs4 import BeautifulSoup
-import httpx
 
 try:
     from fake_useragent import UserAgent as _FakeUA
@@ -19,75 +18,150 @@ except ImportError:
     def _get_ua() -> str:
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+# curl_cffi — primary HTTP client with Chrome TLS fingerprint impersonation.
+# Bypasses basic bot protections (Cloudflare, Akamai, PerimeterX) without
+# needing a full browser. Falls back to CloakBrowser/Playwright if it fails.
+try:
+    from curl_cffi import requests as cffi_requests
+    CFFI_AVAILABLE = True
+except ImportError:
+    CFFI_AVAILABLE = False
+
 from src.models import ProductPrice, Store
 from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-async def _fetch_html(url: str, store_name: str = None) -> Optional[str]:
-    """Fetch HTML using CloakBrowser (stealth Chromium) to bypass Cloudflare/Age popups.
-    
-    Falls back to httpx if CloakBrowser is unavailable.
+# Default headers used when curl_cffi needs explicit headers.
+# When impersonate='chrome' is set, curl_cffi automatically sends matching
+# TLS fingerprint + JA3 + HTTP/2 fingerprint, so we only add minimal overrides.
+_CFFI_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
+
+async def _fetch_html_cffi(url: str, store_name: str = None) -> Optional[str]:
+    """Fetch HTML using curl_cffi with Chrome TLS impersonation.
+
+    This is the primary fetching method. curl_cffi sends a real Chrome TLS
+    fingerprint (JA3, HTTP/2 settings, ALPN) so most bot protections let it
+    through without challenging. Uses tenacity for retry on transient errors.
     """
-    # Try CloakBrowser first
-    try:
-        from src.scrapers.playwright_scrapers import CLOAK_AVAILABLE, _create_cloak_context
-        if CLOAK_AVAILABLE:
-            browser = await _create_cloak_context(store_name=store_name)
-            page = await browser.new_page()
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                # Bypass age popup via JS click
-                try:
-                    await page.evaluate('''() => {
-                        const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
-                        for (const el of document.querySelectorAll('a, button, input')) {
-                            const t = el.textContent.trim();
-                            if (keywords.some(k => t.includes(k))) { el.click(); break; }
-                        }
-                        const selectors = [
-                            '[id*="age_popup"]', '[id*="popup18plus"]', '[id*="wrapper_age"]',
-                            '[id*="active_popup"]', '.age-overlay', '.modal-backdrop',
-                            '.modal-overlay', '.popup-overlay'
-                        ];
-                        selectors.forEach(sel => {
-                            document.querySelectorAll(sel).forEach(el => el.remove());
-                        });
-                        document.body.classList.remove('modal-open');
-                        document.body.style.overflow = 'auto';
-                    }''')
-                    await asyncio.sleep(1)
-                except:
-                    pass
-                await asyncio.sleep(3)
-                return await page.content()
-            except Exception as e:
-                logger.warning(f"CloakBrowser fetch failed for {url}: {e}")
-                return None
-            finally:
-                await page.close()
-                await browser.close()
-    except ImportError:
-        pass
-    
-    # Fallback: httpx with retry
+    if not CFFI_AVAILABLE:
+        return None
+
     from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception_type
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, verify=False) as client:
-        try:
+
+    try:
+        async with cffi_requests.AsyncSession(impersonate="chrome") as session:
             retrying = AsyncRetrying(
                 stop=stop_after_attempt(3),
                 wait=wait_exponential(multiplier=1, min=2, max=8),
-                retry=retry_if_exception_type(
-                    (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)
-                ),
                 reraise=True,
             )
             async for attempt in retrying:
                 with attempt:
-                    resp = await client.get(url, headers={"User-Agent": _get_ua()})
-                    return resp.text if resp.status_code == 200 else None
-        except Exception:
+                    resp = await session.get(
+                        url,
+                        headers=_CFFI_HEADERS,
+                        timeout=15,
+                        allow_redirects=True,
+                    )
+                    if resp.status_code == 200:
+                        text = resp.text
+                        if text and len(text) > 200:
+                            logger.debug("curl_cffi SUCCESS for %s (%d chars)", store_name or url, len(text))
+                            return text
+                        else:
+                            logger.warning("curl_cffi got 200 but body too short for %s (%d chars)", store_name or url, len(text) if text else 0)
+                            return None
+                    else:
+                        logger.warning("curl_cffi got status %d for %s", resp.status_code, store_name or url)
+                        # Non-200 — don't retry, just return None
+                        return None
+    except Exception as e:
+        logger.warning("curl_cffi failed for %s: %s", store_name or url, e)
+        return None
+
+
+async def _fetch_html_playwright(url: str, store_name: str = None) -> Optional[str]:
+    """Fetch HTML using CloakBrowser (stealth Chromium).
+
+    This is the browser fallback when curl_cffi can't get through (e.g.,
+    JS-rendered pages, age-gate popups, advanced Cloudflare challenges).
+    """
+    try:
+        from src.scrapers.playwright_scrapers import CLOAK_AVAILABLE, _create_cloak_context
+        if not CLOAK_AVAILABLE:
             return None
+
+        browser = await _create_cloak_context(store_name=store_name)
+        page = await browser.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # Bypass age popup via JS click
+            try:
+                await page.evaluate('''() => {
+                    const keywords = ['מעל 18', 'מעל', 'אני מאשר', 'אישור', 'כן', 'המשך', 'Yes', 'I am'];
+                    for (const el of document.querySelectorAll('a, button, input')) {
+                        const t = el.textContent.trim();
+                        if (keywords.some(k => t.includes(k))) { el.click(); break; }
+                    }
+                    const selectors = [
+                        '[id*="age_popup"]', '[id*="popup18plus"]', '[id*="wrapper_age"]',
+                        '[id*="active_popup"]', '.age-overlay', '.modal-backdrop',
+                        '.modal-overlay', '.popup-overlay'
+                    ];
+                    selectors.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(el => el.remove());
+                    });
+                    document.body.classList.remove('modal-open');
+                    document.body.style.overflow = 'auto';
+                }''')
+                await asyncio.sleep(1)
+            except:
+                pass
+            await asyncio.sleep(3)
+            return await page.content()
+        except Exception as e:
+            logger.warning("CloakBrowser fetch failed for %s: %s", store_name or url, e)
+            return None
+        finally:
+            await page.close()
+            await browser.close()
+    except ImportError:
+        return None
+    except Exception as e:
+        logger.warning("Playwright fallback error for %s: %s", store_name or url, e)
+        return None
+
+
+async def _fetch_html(url: str, store_name: str = None) -> Optional[str]:
+    """Fetch HTML using a layered fallback chain:
+
+    1. **curl_cffi** (primary) — Chrome TLS fingerprint impersonation.
+       Fast, lightweight, bypasses most basic bot protections.
+    2. **CloakBrowser/Playwright** (fallback) — full stealth Chromium.
+       Handles JS-rendered pages, age gates, and advanced challenges.
+    3. **None** → caller (UnifiedScraper) triggers LLM fallback.
+    """
+    # ── Stage 1: curl_cffi ─────────────────────────────────────────────
+    html_text = await _fetch_html_cffi(url, store_name)
+    if html_text:
+        return html_text
+
+    logger.info("curl_cffi failed for %s — falling back to Playwright", store_name or url)
+
+    # ── Stage 2: CloakBrowser/Playwright ───────────────────────────────
+    html_text = await _fetch_html_playwright(url, store_name)
+    if html_text:
+        return html_text
+
+    # ── Stage 3: all HTTP methods failed ────────────────────────────────
+    # Caller (UnifiedScraper._scrape_one_store) will trigger LLM fallback.
+    logger.warning("All HTTP fetch methods failed for %s — LLM fallback will be triggered by caller", store_name or url)
+    return None
 
 
 class MagentoHTMLScraper:

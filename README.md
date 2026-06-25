@@ -1,6 +1,6 @@
-# AV Hermes Turki — Turkí Price Intelligence (v2.5.0) 🦃📊
+# AV Hermes Turki — Turkí Price Intelligence (v2.12.0) 🦃📊
 
-מנוע פייתון מתקדם להשוואת מחירי אלכוהול בזמן אמת ב-20 חנויות מובילות בישראל, המשתמש ב-**CloakBrowser (Stealth Chromium)** למעבר חומות Cloudflare/הגנות בוטים, שמירה מיידית ב-**SQLite**, ומערכת נירמול אלגוריתמית חכמה.
+מנוע פייתון מתקדם להשוואת מחירי אלכוהול בזמן אמת ב-20 חנויות מובילות בישראל, המשתמש ב-**curl_cffi (Chrome TLS Impersonation)** כשכבת ה-fetch הראשית, עם fallback ל-**CloakBrowser (Stealth Chromium)** לאתרים כבדים, שמירה מיידית ב-**SQLite**, ומערכת **Adaptive Scraping Frequency** לחיסכון במשאבים ומניעת bans.
 
 המערכת פותחה במיוחד עבור **הטורקי** כחנות Reference לצורך זיהוי פערי מחירים, מבצעים אגרסיביים ויצירת מודיעין תחרותי חצי-אוטומטי.
 
@@ -12,7 +12,9 @@
 
 ## 🚀 תכונות מרכזיות
 
-- **CloakBrowser Stealth Integration**: שימוש בדפדפן Chromium ייעודי הכולל 58 פאטצ'ים ברמת קוד המקור של C++ (ביטול `navigator.webdriver`, שינוי TLS fingerprint, הגדרת פלאגינים פיקטיביים) למעבר חלק של Cloudflare ו-reCAPTCHA באתרים מוגנים כמו פאנקו והיבואן.
+- **curl_cffi Chrome TLS Impersonation (v2.12+)**: שכבת ה-HTTP הראשית משתמשת ב-`curl_cffi.requests.AsyncSession(impersonate='chrome')` — שולחת TLS fingerprint אמיתי של Chrome (JA3, HTTP/2 settings, ALPN) כדי לעקוף הגנות בוטים בסיסיות (Cloudflare, Akamai, PerimeterX) **בלי להקים דפדפן**. מהיר פי 10+ מ-CloakBrowser. אם curl_cffi נכשל → fallback אוטומטי ל-CloakBrowser → LLM fallback. החליף את `httpx` בכל שכבות ה-HTTP (HTML, WooCommerce API, Magento API, Haturki API).
+- **Adaptive Scraping Frequency (v2.12+)**: מנגנון חכם שמדלג סריקה של מוצרים עם מחיר יציב 30+ ימים (אלא אם עברו 24 שעות מהסריקה האחרונה — periodic re-validation). מוצרים שהמחיר שלהם השתנה לפני פחות מ-7 ימים נסרקים בכל ריצה. חוסך משאבים, מונע bans, ומאיץ ריצות קרון. לוג ברור: `⏭️ Skipping [Product Name] - Price stable for 30+ days`.
+- **CloakBrowser Stealth Integration**: שימוש בדפדפן Chromium ייעודי הכולל 58 פאטצ'ים ברמת קוד המקור של C++ (ביטול `navigator.webdriver`, שינוי TLS fingerprint, הגדרת פלאגינים פיקטיביים) למעבר חלק של Cloudflare ו-reCAPTCHA באתרים מוגנים כמו פאנקו והיבואן. **כעת שכבת fallback** — רץ רק כש-curl_cffi לא מצליח לעבור.
 - **SQLite Database Architecture**: כל סריקה נשמרת בזמן אמת בטבלאות `price_results`, `price_history`, `deal_scores`, ו-`scraper_health`. תוצאות חלקיות נשמרות גם אם חנויות אחרות נכשלות בריצה. SQLite3 הוא חלק מ-stdlib של פייתון — אין צורך בהתקנה נפרדת.
 - **Streamlit Dashboard (`dashboard.py`)**: דשבורד RTL חי ב-`turki.avolkov.click` המציג רק את הריצה האחרונה, עם בחירת מוצר, השוואה לטורקי, וזיהוי דילים בצבע Hermes Teal.
 - **Tracked Products Suite (`manage_tracker.py`)**: כלי ניהול מובנה ב-CLI למעקב, הוספה, הסרה והרצה של סוויטת מוצרים נבחרים (וודקה בלוגה, רוסקי, קברנה סוביניון, ג'וני בלאק ועוד) לאיתור מבצעי פתאום.
@@ -96,10 +98,10 @@ cd AV-hermes-turki
 python3 -m venv venv
 source venv/bin/activate
 
-# התקנת כל החבילות (כולל CloakBrowser, PyYAML, וכל השאר)
+# התקנת כל החבילות (כולל curl_cffi, CloakBrowser, PyYAML, וכל השאר)
 pip install -r requirements.txt
 
-# התקנת מנוע Playwright ב-Venv
+# התקנת מנוע Playwright ב-Venv (fallback בלבד — curl_cffi הראשי לא צריך דפדפן)
 playwright install chromium
 
 # הגדרת משתני סביבה נדרשים ב-~/.hermes/.env:
@@ -169,25 +171,35 @@ streamlit run dashboard.py --server.port 5053
 
 ---
 
-## 🕷️ ארכיטקטורת הסקראפינג — שני מסלולים (20 חנויות)
+## 🕷️ ארכיטקטורת הסקראפינג — שלוש שכבות Fallback (20 חנויות)
 
-המערכת מפרידה בצורה נקייה בין שני מסלולי סריקה: **API** (מהיר, ללא דפדפן) ו-**Browser** (CloakBrowser/Playwright, לאתרי JS). ההפרדה מאפשרת תחזוקה עצמאית של כל מסלול, ומונעת כשל מדבק בין חנויות API לחנויות דפדפן.
+המערכת משתמשת בשרשרת fallback תלת-שלבית לכל fetch:
+
+```
+1. curl_cffi (Chrome TLS impersonation)     ← primary, ~200ms, no browser
+       ↓ fail
+2. CloakBrowser / Playwright (stealth Chromium)  ← fallback, ~5-10s, full browser
+       ↓ fail
+3. LLM fallback (DeepSeek V4 Flash)         ← last resort, extract price from raw HTML
+```
+
+ההפרדה בין API (קל) ו-Browser (כבד) נשמרת, אבל כעת גם חנויות ה-Browser מנסות curl_cffi קודם — מה שמקצר ריצות משמעותית.
 
 > **מסמך ארכיטקטורה מלא:** ראה [`ARCHITECTURE.md`](./ARCHITECTURE.md) להסבר מפורט על מודולים, data flow, ו-responsibilities.
 
-### מסלול 1 — REST API (מהיר, ללא דפדפן)
+### שכבה 1 — curl_cffi (Primary HTTP Client)
 
-סריקה ישירה דרך HTTP (httpx) ללא הפעלת Chromium. המהיר ביותר — ~200ms לחנות.
+כל קריאות ה-HTTP (HTML + REST APIs) עוברות דרך `curl_cffi.requests.AsyncSession(impersonate='chrome')`. הספרייה שולחת TLS fingerprint אמיתי של Chrome (JA3, HTTP/2 SETTINGS, ALPN, cipher suites) וכך עוקפת הגנות בוטים בסיסיות בלי להקים דפדפן. מהיר פי 10+ מ-CloakBrowser.
 
 | מנוע | חנויות | הערות |
 |------|--------|-------|
 | **Haturki REST API** | הטורקי (reference) | API ייעודי, מחזיר את כל המלאי (3682 מוצרים) — דורש פילטרים קפדניים. |
 | **WooCommerce Store API** | בנא, דרך היין, ארי, Liquor Store, אלכוהום, משקאות המשמח, Coffeco, Alcohol123, בית היין | חיפוש פרוגרסיבי דו-שלבי (2 מילים → 1 מילה), 100 מוצרים לתוצאה. |
-| **HTML Scraper** (CloakBrowser fetch + BeautifulSoup) | שר המשקאות, אליאסי, לגימה, Drinks4U | טעינת HTML דרך CloakBrowser (מעקף Cloudflare) עם פרסור סטטי, ללא רנדור JS מלא. |
+| **HTML Scraper** (curl_cffi fetch + BeautifulSoup) | שר המשקאות, אליאסי, לגימה, Drinks4U | טעינת HTML דרך curl_cffi (מעקף Cloudflare) עם פרסור סטטי, ללא רנדור JS מלא. |
 
-### מסלול 2 — CloakBrowser / Playwright (דפדפן מלא, JS render)
+### שכבה 2 — CloakBrowser / Playwright (Browser Fallback)
 
-סריקה דרך דפדפן Chromium חשאשי (CloakBrowser — 58 פאטצ'ים ברמת C++). נדרש לאתרים שטוענים מוצרים דינמית או דורשים אינטראקציה (פופאפ גיל).
+סריקה דרך דפדפן Chromium חשאשי (CloakBrowser — 58 פאטצ'ים ברמת C++). נדרש לאתרים שטוענים מוצרים דינמית או דורשים אינטראקציה (פופאפ גיל). **כעת שכבת fallback** — רץ רק כש-curl_cffi נכשל.
 
 | מנוע | חנויות | הערות |
 |------|--------|-------|
@@ -229,6 +241,7 @@ streamlit run dashboard.py --server.port 5053
 - **Hard timeout לכל חנות** (90-120 שניות) — חנות אחת שתקועה לא יכולה לעצור ריצה מלאה.
 - **שמירה מיידית ל-SQLite** — כל חנות נשמרת בנפרד, תוצאות חלקיות שורדות כשלונות.
 - **Health Gate** — ה-Orchestrator בודק response rate לפני סריקה; אם מתחת לסף, הסריקה מבוטלת.
+- **Adaptive Scraping Frequency** — מוצרים עם מחיר יציב 30+ ימים מדלגים אוטומטית (ראה סעיף נפרד למעלה).
 - **LLM Deal Validation** — דילים מועמדים עוברים אימות LLM למניעת false positives.
 - **Strict Volume Matching** (±50ml) — מונע השוואת 200ml מול 1L.
 - **Brand Hard Price Floors** — מחירים נמוכים מהרצפה לפי מותג נפסלים אוטומטית.
@@ -326,6 +339,42 @@ API_ENGINES = {"haturki_api", "woocommerce", "magento"}  # no-limit engines
 10. **מניעת שגיאות הרשאות Git**: דחיפת שינויים ל-GitHub עשויה להיכשל עם שגיאת 403 במקרה של Token פג תוקף. במקרה כזה יש לבצע רענון הרשאות באמצעות ה-GitHub CLI.
 11. **סינון 200ml/500ml (v2.5+)**: בקבוקונים קטנים מסוננים ברמת ה-build_report. הם לא מופיעים בדוח ובדשבורד ולא משווים מול הטורקי — מונע דילים מזויפים מסוג "₪25 ל-200ml מול ₪65 לליטר".
 12. **Hermes config — extract backend**: כדי שחיפושים ברשת יחזירו תוכן מלא במהירות, יש להגדיר `web.extract_backend: tavily` ב-`~/.hermes/config.yaml` ולשמור את `TAVILY_API_KEY` ב-`~/.hermes/.env`.
+
+---
+
+## 📊 Adaptive Scraping Frequency (v2.12+)
+
+מנגנון חכם שמתאים את תדירות הסריקה לכל מוצר בנפרד, בהתבסס על יציבות המחיר ההיסטורית שלו. מטרה: חיסכון במשאבים, מניעת bans, וזמני ריצה קצרים יותר לקרון.
+
+### איך זה עובד
+
+לפני כל ריצה, ה-Orchestrator בודק את `price_history` ב-DB לכל מוצר tracked ומחליט אם לסרוק או לדלג:
+
+| מצב מחיר | פעולה | לוג |
+|---|---|---|
+| אין היסטוריה (first run) | ✅ סרוק | `no price history yet — first scrape` |
+| השתנה <7 ימים | ✅ סרוק כל פעם | `price changed Xd ago (< 7d) — scraping every run` |
+| יציב 30+ ימים + <24h מסריקה אחרונה | ⏭️ **דלג** | `⏭️ Skipping [Product] - Price stable for 30+ days` |
+| יציב 30+ ימים + >24h מסריקה אחרונה | ✅ סרוק (re-validation) | `price stable for Xd but Yd since last scrape — periodic re-validation` |
+| השתנה 7-30 ימים | ✅ סרוק (monitoring) | `price changed Xd ago — monitoring` |
+
+### חישוב יציבות
+
+המנגנון (`get_query_price_stability()` ב-`sqlite_store.py`) מקבץ שורות `price_history` לפי `run_id` (כל סריקה = run אחד), מחשב את ה-best price (min) לכל run, ואז משווה בין runs רצופים כדי לזהות שינויים. זה מונע false positives מריבוי חנויות באותו run.
+
+### איפה זה רץ
+
+- **`turki_tools.run_full_scan()`** — מסנן queries לפני שליחה ל-`async_main()`. מחזיר `skipped_queries` בפלט.
+- **`orchestrator.run_tracked()`** — מסנן queries לפני הרצת `run_query()`.
+
+### הגדרות
+
+```python
+# OrchestratorAgent class constants
+STABLE_THRESHOLD_DAYS = 30        # דלג אם יציב 30+ ימים
+MIN_RESCRAPE_INTERVAL_HOURS = 24  # אבל תמיד סרוק מחדש אחרי 24 שעות
+RECENT_CHANGE_DAYS = 7            # סרוק כל פעם אם השתנה <7 ימים
+```
 
 ---
 

@@ -4,7 +4,6 @@ import html
 import json
 from typing import List, Optional
 from bs4 import BeautifulSoup
-import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 try:
@@ -18,6 +17,13 @@ try:
 except ImportError:
     def _get_ua() -> str:
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# curl_cffi — primary HTTP client with Chrome TLS fingerprint impersonation.
+try:
+    from curl_cffi import requests as cffi_requests
+    CFFI_AVAILABLE = True
+except ImportError:
+    CFFI_AVAILABLE = False
 
 from src.models import ProductPrice, Store
 from src.utils.filters import clean_product_name, is_bogus_price, is_relevant_product, extract_volume_ml
@@ -37,10 +43,10 @@ class HaturkiAPIScraper:
     async def search(self, query: str) -> List[ProductPrice]:
         """Search products via the Haturki API.
         
+        Uses curl_cffi with Chrome impersonation as primary HTTP client.
         Retries up to 3 times with exponential backoff on network errors.
         """
         headers = {
-            "User-Agent": _get_ua(),
             "Accept": "application/json",
             "Origin": "https://haturki.com",
             "Referer": "https://haturki.com/",
@@ -50,25 +56,27 @@ class HaturkiAPIScraper:
         # and filter locally. Limit to first call since API returns 3682 products.
         search_url = f"{self.API_BASE}/products?search={query}"
         
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        data = None
+        if CFFI_AVAILABLE:
             try:
-                # Retry on network errors (connection, timeout, server disconnect)
                 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception_type
-                retrying = AsyncRetrying(
-                    stop=stop_after_attempt(3),
-                    wait=wait_exponential(multiplier=1, min=2, max=10),
-                    retry=retry_if_exception_type((httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)),
-                    reraise=True,
-                )
-                async for attempt in retrying:
-                    with attempt:
-                        resp = await client.get(search_url, headers=headers)
-                        if resp.status_code != 200:
-                            return []
-                        data = resp.json()
+                async with cffi_requests.AsyncSession(impersonate="chrome") as session:
+                    retrying = AsyncRetrying(
+                        stop=stop_after_attempt(3),
+                        wait=wait_exponential(multiplier=1, min=2, max=10),
+                        reraise=True,
+                    )
+                    async for attempt in retrying:
+                        with attempt:
+                            resp = await session.get(search_url, headers=headers, timeout=20, allow_redirects=True)
+                            if resp.status_code != 200:
+                                return []
+                            data = resp.json()
             except Exception as e:
-                print(f"  ⚠️ Haturki API error after retries: {e}")
+                logger.warning("Haturki API error after retries (curl_cffi): %s", e)
                 return []
+        else:
+            return []
         
         if data.get("status") != "success":
             return []

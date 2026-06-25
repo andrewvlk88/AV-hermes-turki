@@ -85,6 +85,7 @@ from src.storage.sqlite_store import (
     mark_store_error,
     mark_store_running,
     run_id_gen,
+    get_query_price_stability,
 )
 from src.agents.analyzer import AnalyzerAgent
 from src.agents.extractor import ExtractorAgent
@@ -191,6 +192,15 @@ class OrchestratorAgent:
     _PLAN_CACHE: Dict[str, tuple] = {}  # {cache_key: (Plan, expiry_timestamp)}
     _PLAN_CACHE_TTL = 1800  # 30 minutes in seconds
     _PLAN_CACHE_ENABLED = True  # can be disabled at runtime
+
+    # ── Adaptive scraping frequency ────────────────────────────────
+    # Queries whose price hasn't changed in STABLE_THRESHOLD_DAYS or more
+    # are skipped unless MIN_RESCRAPE_INTERVAL_HOURS have passed since
+    # the last successful scrape. Queries with a price change within
+    # RECENT_CHANGE_DAYS are scraped on every run.
+    STABLE_THRESHOLD_DAYS = 30       # skip if stable for 30+ days
+    MIN_RESCRAPE_INTERVAL_HOURS = 24  # but always rescrape after 24h
+    RECENT_CHANGE_DAYS = 7           # scrape every run if changed <7d ago
 
     def __init__(self, timeout_per_query: int = 30 * 60):
         self.timeout = timeout_per_query
@@ -922,6 +932,105 @@ class OrchestratorAgent:
         }
 
     # ═════════════════════════════════════════════════════════════
+    #  Adaptive scraping frequency
+    # ═════════════════════════════════════════════════════════════
+
+    @classmethod
+    def _should_skip_query(cls, query: str) -> tuple[bool, str]:
+        """Check if a query should be skipped based on price stability.
+
+        Adaptive frequency logic:
+        - **No history**: don't skip (first run, need data).
+        - **Price changed within RECENT_CHANGE_DAYS (7d)**: don't skip
+          (active price movement — scrape every run).
+        - **Price stable for STABLE_THRESHOLD_DAYS (30d)+**: skip,
+          UNLESS MIN_RESCRAPE_INTERVAL_HOURS (24h) have passed since
+          the last successful scrape (periodic re-validation).
+        - **Price changed between 7–30 days ago**: don't skip (moderate
+          stability, keep monitoring).
+
+        Returns:
+            (should_skip, reason) — reason is a human-readable string
+            suitable for logging. If should_skip is False, reason
+            explains why the query is being scraped.
+        """
+        stability = get_query_price_stability(query)
+        if stability is None:
+            return False, "no price history yet — first scrape"
+
+        days_since_change = stability.get("days_since_change")
+        days_since_scrape = stability.get("days_since_scrape")
+
+        # No valid timestamps — can't determine, don't skip
+        if days_since_change is None or days_since_scrape is None:
+            return False, "unable to parse price history timestamps"
+
+        # Recent change — always scrape
+        if days_since_change < cls.RECENT_CHANGE_DAYS:
+            return False, (
+                f"price changed {days_since_change}d ago (< {cls.RECENT_CHANGE_DAYS}d) — "
+                f"scraping every run"
+            )
+
+        # Stable for 30+ days — skip unless 24h have passed
+        if days_since_change >= cls.STABLE_THRESHOLD_DAYS:
+            hours_since_scrape = days_since_scrape * 24  # approximate
+            if hours_since_scrape < cls.MIN_RESCRAPE_INTERVAL_HOURS:
+                return True, (
+                    f"Skipping {query} - Price stable for {days_since_change}+ days "
+                    f"(last scrape {days_since_scrape}d ago < {cls.MIN_RESCRAPE_INTERVAL_HOURS}h threshold)"
+                )
+            else:
+                return False, (
+                    f"price stable for {days_since_change}d but {days_since_scrape}d since "
+                    f"last scrape (> {cls.MIN_RESCRAPE_INTERVAL_HOURS}h) — periodic re-validation"
+                )
+
+        # Moderate stability (7–30 days) — keep scraping
+        return False, (
+            f"price changed {days_since_change}d ago — monitoring"
+        )
+
+    @classmethod
+    def filter_queries_by_adaptive_frequency(
+        cls, queries: List[str]
+    ) -> tuple[List[str], List[Dict[str, str]]]:
+        """Filter a list of tracked queries using adaptive scraping frequency.
+
+        For each query, checks price stability in the DB and decides whether
+        to scrape or skip. Skipped queries are logged with a clear message
+        so the behavior is traceable.
+
+        Args:
+            queries: List of tracked query strings to evaluate.
+
+        Returns:
+            (active_queries, skipped) where:
+            - ``active_queries``: queries that should be scraped now.
+            - ``skipped``: list of ``{"query": str, "reason": str}`` dicts
+              for queries that were skipped, for logging/reporting.
+        """
+        active: List[str] = []
+        skipped: List[Dict[str, str]] = []
+
+        for query in queries:
+            should_skip, reason = cls._should_skip_query(query)
+            if should_skip:
+                logger.info("⏭️ %s", reason)
+                skipped.append({"query": query, "reason": reason})
+            else:
+                logger.debug("▶️ %s — %s", query, reason)
+                active.append(query)
+
+        if skipped:
+            logger.info(
+                "Adaptive frequency: %d queries active, %d skipped (stable prices)",
+                len(active), len(skipped),
+            )
+
+        return active, skipped
+
+    # ═════════════════════════════════════════════════════════════
     #  Summary builder
     # ═════════════════════════════════════════════════════════════
 
@@ -1036,10 +1145,16 @@ class OrchestratorAgent:
     async def run_tracked(self) -> List[PriceReport]:
         """Run the full pipeline for all tracked queries from the DB.
 
+        Uses adaptive scraping frequency: queries whose price hasn't changed
+        in 30+ days are skipped (unless 24h have passed since last scrape)
+        to save resources and avoid bans. Queries with recent price changes
+        (<7 days) are scraped on every run.
+
         Backward-compatible method.
 
         Returns:
-            List of PriceReports, one per tracked query
+            List of PriceReports, one per tracked query (skipped queries
+            are not included in the returned list).
         """
         init_db()
         conn = get_db()
@@ -1055,9 +1170,24 @@ class OrchestratorAgent:
             logger.info("Orchestrator: no tracked queries found")
             return []
 
-        logger.info("Orchestrator: running %d tracked queries", len(queries))
+        # ── Adaptive frequency: filter out stable queries ───────────
+        active_queries, skipped = self.filter_queries_by_adaptive_frequency(queries)
+        for s in skipped:
+            logger.info("⏭️ Skipping %s - Price stable for 30+ days", s["query"])
+
+        if not active_queries:
+            logger.info(
+                "Orchestrator: all %d tracked queries skipped by adaptive frequency",
+                len(queries),
+            )
+            return []
+
+        logger.info(
+            "Orchestrator: running %d/%d tracked queries (%d skipped by adaptive frequency)",
+            len(active_queries), len(queries), len(skipped),
+        )
         reports = []
-        for query in queries:
+        for query in active_queries:
             report = await self.run_query(query)
             reports.append(report)
         return reports

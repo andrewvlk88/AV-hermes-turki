@@ -6,7 +6,6 @@ import asyncio
 from urllib.parse import quote
 from typing import List, Optional
 from bs4 import BeautifulSoup
-import httpx
 
 try:
     from fake_useragent import UserAgent as _FakeUA
@@ -19,6 +18,15 @@ try:
 except ImportError:
     def _get_ua() -> str:
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# curl_cffi — primary HTTP client with Chrome TLS fingerprint impersonation.
+# Bypasses basic bot protections without launching a full browser.
+# Falls back to httpx if curl_cffi is not installed, then to Playwright.
+try:
+    from curl_cffi import requests as cffi_requests
+    CFFI_AVAILABLE = True
+except ImportError:
+    CFFI_AVAILABLE = False
 
 try:
     from src.scrapers.playwright_scrapers import PLAYWRIGHT_AVAILABLE
@@ -33,9 +41,50 @@ logger = get_logger(__name__)
 
 
 BASE_HEADERS = {
-    "User-Agent": _get_ua(),
     "Accept": "application/json",
+    "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7",
 }
+
+
+async def _cffi_get_json(url: str, headers: dict = None, timeout: float = 12.0) -> Optional[dict]:
+    """GET a JSON API endpoint using curl_cffi with Chrome impersonation.
+
+    Returns parsed JSON dict on success (HTTP 200 + valid JSON), None otherwise.
+    Uses tenacity for retry on transient network errors.
+    """
+    if not CFFI_AVAILABLE:
+        return None
+
+    from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+    merged_headers = {**BASE_HEADERS, **(headers or {})}
+    try:
+        async with cffi_requests.AsyncSession(impersonate="chrome") as session:
+            retrying = AsyncRetrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=1, min=2, max=8),
+                reraise=True,
+            )
+            async for attempt in retrying:
+                with attempt:
+                    resp = await session.get(
+                        url,
+                        headers=merged_headers,
+                        timeout=timeout,
+                        allow_redirects=True,
+                    )
+                    if resp.status_code == 200:
+                        try:
+                            return resp.json()
+                        except Exception:
+                            logger.warning("curl_cffi got 200 but JSON parse failed for %s", url)
+                            return None
+                    else:
+                        logger.warning("curl_cffi got status %d for %s", resp.status_code, url)
+                        return None
+    except Exception as e:
+        logger.warning("curl_cffi API request failed for %s: %s", url, e)
+        return None
 
 
 class WooCommerceAPIScraper:
@@ -78,37 +127,25 @@ class WooCommerceAPIScraper:
         
         from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception_type
         
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False) as client:
-            for term in search_terms:
-                query_encoded = quote(term)
-                search_url = f"{self.store.url}/?rest_route=/wc/store/products&search={query_encoded}&per_page=100"
-                api_url = f"{self.store.url}/wp-json/wc/store/products?search={query_encoded}&per_page=100"
-                
-                for url in [search_url, api_url]:
-                    try:
-                        # Retry on network errors (server disconnect, timeout, connection)
-                        retrying = AsyncRetrying(
-                            stop=stop_after_attempt(3),
-                            wait=wait_exponential(multiplier=1, min=2, max=8),
-                            retry=retry_if_exception_type(
-                                (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError)
-                            ),
-                            reraise=True,
-                        )
-                        async for attempt in retrying:
-                            with attempt:
-                                resp = await client.get(url, headers=BASE_HEADERS)
-                                if resp.status_code == 200:
-                                    data = resp.json()
-                                    if isinstance(data, list) and len(data) > 0:
-                                        parsed = self._parse_products(data, query)
-                                        for p in parsed:
-                                            if p.product_url not in seen_urls:
-                                                seen_urls.add(p.product_url)
-                                                all_products.append(p)
-                    except Exception as e:
-                        logger.warning("WooCommerce API request failed for %s: %s", url, e)
-                        continue
+        from src.scrapers.unified_scraper import _cffi_get_json, CFFI_AVAILABLE
+        
+        for term in search_terms:
+            query_encoded = quote(term)
+            search_url = f"{self.store.url}/?rest_route=/wc/store/products&search={query_encoded}&per_page=100"
+            api_url = f"{self.store.url}/wp-json/wc/store/products?search={query_encoded}&per_page=100"
+            
+            for url in [search_url, api_url]:
+                try:
+                    data = await _cffi_get_json(url, timeout=12.0)
+                    if data is not None and isinstance(data, list) and len(data) > 0:
+                        parsed = self._parse_products(data, query)
+                        for p in parsed:
+                            if p.product_url not in seen_urls:
+                                seen_urls.add(p.product_url)
+                                all_products.append(p)
+                except Exception as e:
+                    logger.warning("WooCommerce API request failed for %s: %s", url, e)
+                    continue
                         
         return all_products
     
@@ -245,29 +282,29 @@ class MagentoAPIScraper:
         all_products = []
         seen_skus = set()
         
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False) as client:
-            for term in search_terms:
-                query_encoded = quote(term)
-                search_url = (
-                    f"{self.store.url}/rest/default/V1/products"
-                    f"?searchCriteria[filterGroups][0][filters][0][field]=name"
-                    f"&searchCriteria[filterGroups][0][filters][0][value]=%25{query_encoded}%25"
-                    f"&searchCriteria[pageSize]=100"
-                )
-                try:
-                    resp = await client.get(search_url, headers=BASE_HEADERS)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        items = data.get("items", [])
-                        if items:
-                            parsed = self._parse_items(items, query)
-                            for p in parsed:
-                                if p.sku not in seen_skus:
-                                    seen_skus.add(p.sku)
-                                    all_products.append(p)
-                except Exception as e:
-                    logger.warning("Magento API request failed for %s: %s", self.store.url, e)
-                    continue
+        from src.scrapers.unified_scraper import _cffi_get_json
+        
+        for term in search_terms:
+            query_encoded = quote(term)
+            search_url = (
+                f"{self.store.url}/rest/default/V1/products"
+                f"?searchCriteria[filterGroups][0][filters][0][field]=name"
+                f"&searchCriteria[filterGroups][0][filters][0][value]=%25{query_encoded}%25"
+                f"&searchCriteria[pageSize]=100"
+            )
+            try:
+                data = await _cffi_get_json(search_url, timeout=12.0)
+                if data is not None:
+                    items = data.get("items", [])
+                    if items:
+                        parsed = self._parse_items(items, query)
+                        for p in parsed:
+                            if p.sku not in seen_skus:
+                                seen_skus.add(p.sku)
+                                all_products.append(p)
+            except Exception as e:
+                logger.warning("Magento API request failed for %s: %s", self.store.url, e)
+                continue
                     
         return all_products
         

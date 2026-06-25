@@ -88,11 +88,16 @@ async def run_full_scan() -> Dict[str, Any]:
     ``run.async_main`` which internally calls ``search_all``
     (Haturki API → 19 other stores) and ``build_report``.
 
+    Uses adaptive scraping frequency: queries whose price hasn't changed
+    in 30+ days are skipped (unless 24h have passed since last scrape)
+    to save resources and avoid bans.
+
     No parameters required — the tool is self-contained.
 
     Returns:
         ``{"ok": True, "run_id": str, "queries": [...], "summary": str,
-           "deals": [...], "stores_checked": int, "stores_responded": int}``
+           "deals": [...], "stores_checked": int, "stores_responded": int,
+           "skipped_queries": [...]}``
         on success, or ``{"ok": False, "error": str}`` on failure.
     """
     # Ensure tracked_queries table exists
@@ -115,6 +120,33 @@ async def run_full_scan() -> Dict[str, Any]:
     if not queries:
         return _err("no tracked products found in tracked_queries table")
 
+    # ── Adaptive scraping frequency: skip stable queries ──────────
+    from src.agents.orchestrator import OrchestratorAgent
+    active_queries, skipped = OrchestratorAgent.filter_queries_by_adaptive_frequency(queries)
+    skipped_info = [{"query": s["query"], "reason": s["reason"]} for s in skipped]
+
+    if not active_queries:
+        logger.info(
+            "run_full_scan: all %d tracked queries skipped by adaptive frequency",
+            len(queries),
+        )
+        return _ok({
+            "run_id": "",
+            "queries": [],
+            "summary": f"All {len(queries)} tracked queries skipped — prices stable for 30+ days",
+            "deals": [],
+            "anomalies": [],
+            "stores_checked": 0,
+            "stores_responded": 0,
+            "skipped_queries": skipped_info,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    logger.info(
+        "run_full_scan: %d/%d queries active, %d skipped by adaptive frequency",
+        len(active_queries), len(queries), len(skipped),
+    )
+
     try:
         from run import async_main  # lazy import — run.py is at project root
     except ImportError as exc:
@@ -122,23 +154,24 @@ async def run_full_scan() -> Dict[str, Any]:
 
     try:
         # async_main generates its own shared_run_id internally
-        report = await async_main(queries)
+        report = await async_main(active_queries)
         run_ids = _latest_run_ids()
         # The run_id for these queries is the newest one
         run_id = ""
-        for q in queries:
+        for q in active_queries:
             if q in run_ids:
                 run_id = run_ids[q]
                 break
 
         return _ok({
             "run_id": run_id,
-            "queries": queries,
+            "queries": active_queries,
             "summary": report.summary if report else "",
             "deals": report.deals_found if report else [],
             "anomalies": report.anomalies if report else [],
             "stores_checked": report.stores_checked if report else 0,
             "stores_responded": report.stores_responded if report else 0,
+            "skipped_queries": skipped_info,
             "timestamp": datetime.now().isoformat(),
         })
     except Exception as exc:
