@@ -87,6 +87,79 @@ DEFAULT_RETRY = {
 }
 
 
+# ════════════════════════════════════════════════════════════════════
+#  Dedicated Circuit Breaker for Hard Stores (Paneco, The Importer, Sar Mashkaot)
+# ════════════════════════════════════════════════════════════════════
+#
+# This is a dedicated, in-memory circuit breaker *only* for the three hard stores.
+# It is completely separate from any general circuit breaker logic.
+# Design goals: clean, extensible (add domain to HARD_STORES to support new ones),
+# observable (state exposed for logging).
+#
+# States:
+#   CLOSED     — normal operation, attempts allowed
+#   HALF-OPEN  — some failures but under threshold
+#   OPEN       — threshold reached, fetches short-circuited (return None immediately)
+#
+# On success → reset to CLOSED
+# On failure → increment; trip to OPEN if >= threshold
+class HardStoreCircuitBreaker:
+    """Dedicated Circuit Breaker for paneco.co.il, the-importer.co.il, mashkaot.co.il only."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._failures = {}
+            cls._instance._tripped = {}
+        return cls._instance
+
+    def _get_domain(self, url: str) -> str:
+        return _extract_domain_simple(url)
+
+    def _get_threshold(self, domain: str) -> int:
+        cfg = HARD_STORES.get(domain, DEFAULT_RETRY)
+        return cfg.get("circuit_breaker_threshold", 2)
+
+    def is_open(self, domain: str) -> bool:
+        """Return True if circuit is open (skip this store)."""
+        return self._tripped.get(domain, False)
+
+    def get_state(self, domain: str) -> str:
+        """Return human-readable circuit state for logging."""
+        if self._tripped.get(domain, False):
+            return "OPEN"
+        failures = self._failures.get(domain, 0)
+        threshold = self._get_threshold(domain)
+        if failures > 0:
+            return f"HALF-OPEN ({failures}/{threshold})"
+        return "CLOSED"
+
+    def record_result(self, domain: str, success: bool) -> str:
+        """Record success/failure. Returns new state string for logging.
+        Only affects hard stores (callers check _is_hard_store first).
+        """
+        if domain not in HARD_STORES:
+            return "N/A (not hard)"
+
+        threshold = self._get_threshold(domain)
+        if success:
+            prev = self._tripped.get(domain, False)
+            self._failures[domain] = 0
+            self._tripped[domain] = False
+            if prev:
+                return "CLOSED (recovered)"
+            return "CLOSED"
+        else:
+            self._failures[domain] = self._failures.get(domain, 0) + 1
+            failures = self._failures[domain]
+            if failures >= threshold:
+                self._tripped[domain] = True
+                return f"OPEN (tripped after {failures} failures, threshold={threshold})"
+            return f"HALF-OPEN ({failures}/{threshold})"
+
+
 def _get_retry_config(store_name: str = None, url: str = None) -> dict:
     """Look up retry configuration for a store.
 
@@ -141,7 +214,25 @@ async def _fetch_html_cffi(
     backoff_factor = retry_config.get("backoff_factor", 2.0)
 
     is_hard = _is_hard_store(url)
-    domain_label = f"[{_extract_domain_simple(url)}]" if is_hard else ""
+    domain = _extract_domain_simple(url)
+    domain_label = f"[{domain}]" if is_hard else ""
+
+    breaker = None
+    circuit_state = "N/A"
+    if is_hard:
+        breaker = HardStoreCircuitBreaker()
+        if breaker.is_open(domain):
+            circuit_state = breaker.get_state(domain)
+            logger.warning(
+                "%s [curl_cffi] Circuit OPEN — skipping fetch | state=%s",
+                domain_label, circuit_state
+            )
+            return None
+        circuit_state = breaker.get_state(domain)
+        logger.info(
+            "%s [curl_cffi] Starting fetch | circuit=%s | attempts=%d base=%.1fs",
+            domain_label, circuit_state, max_attempts, base_delay
+        )
 
     for attempt_num in range(1, max_attempts + 1):
         try:
@@ -157,9 +248,12 @@ async def _fetch_html_cffi(
                     if text and len(text) > 200:
                         if is_hard:
                             logger.info(
-                                "%s [curl_cffi] Attempt %d/%d | Status: Success (%d chars)",
-                                domain_label, attempt_num, max_attempts, len(text),
+                                "%s [curl_cffi] Attempt %d/%d | Status: Success (%d chars) | circuit=%s",
+                                domain_label, attempt_num, max_attempts, len(text), circuit_state,
                             )
+                            if breaker:
+                                state = breaker.record_result(domain, True)
+                                logger.info("%s [curl_cffi] Circuit state after success: %s", domain_label, state)
                         else:
                             logger.debug("curl_cffi SUCCESS for %s (%d chars)", store_name or url, len(text))
                         return text
@@ -195,6 +289,9 @@ async def _fetch_html_cffi(
         "%s [curl_cffi] All %d attempts exhausted",
         domain_label, max_attempts,
     )
+    if is_hard and breaker:
+        state = breaker.record_result(domain, False)
+        logger.info("%s [curl_cffi] Circuit state after failure: %s", domain_label, state)
     return None
 
 
@@ -233,7 +330,25 @@ async def _fetch_html_playwright(
     backoff_factor = retry_config.get("backoff_factor", 2.0)
 
     is_hard = _is_hard_store(url)
-    domain_label = f"[{_extract_domain_simple(url)}]" if is_hard else ""
+    domain = _extract_domain_simple(url)
+    domain_label = f"[{domain}]" if is_hard else ""
+
+    breaker = None
+    circuit_state = "N/A"
+    if is_hard:
+        breaker = HardStoreCircuitBreaker()
+        if breaker.is_open(domain):
+            circuit_state = breaker.get_state(domain)
+            logger.warning(
+                "%s [playwright] Circuit OPEN — skipping fetch | state=%s",
+                domain_label, circuit_state
+            )
+            return None
+        circuit_state = breaker.get_state(domain)
+        logger.info(
+            "%s [playwright] Starting fetch | circuit=%s | attempts=%d base=%.1fs",
+            domain_label, circuit_state, max_attempts, base_delay
+        )
 
     for attempt_num in range(1, max_attempts + 1):
         try:
@@ -272,9 +387,12 @@ async def _fetch_html_playwright(
                 if content and len(content) > 200:
                     if is_hard:
                         logger.info(
-                            "%s [playwright] Attempt %d/%d | Status: Success (%d chars)",
-                            domain_label, attempt_num, max_attempts, len(content),
+                            "%s [playwright] Attempt %d/%d | Status: Success (%d chars) | circuit=%s",
+                            domain_label, attempt_num, max_attempts, len(content), circuit_state,
                         )
+                        if breaker:
+                            state = breaker.record_result(domain, True)
+                            logger.info("%s [playwright] Circuit state after success: %s", domain_label, state)
                     return content
                 else:
                     logger.warning(
@@ -316,6 +434,9 @@ async def _fetch_html_playwright(
         "%s [playwright] All %d attempts exhausted",
         domain_label, max_attempts,
     )
+    if is_hard and breaker:
+        state = breaker.record_result(domain, False)
+        logger.info("%s [playwright] Circuit state after failure: %s", domain_label, state)
     return None
 
 
