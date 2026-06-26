@@ -584,3 +584,21 @@ Personal project — Andrew Volkov (@andrewvlk88)
 | `src/scrapers/playwright_scrapers.py` | EPIPE handling, retry logic, browser timeouts, context cleanup |
 | `src/scrapers/unified_scraper.py` | Orchestration, concurrency control, per-store hard timeout (no browser timeout mirror) |
 | `README.md` | סקציית תיעוד זו |
+
+
+---
+
+## 🛠️ עדכונים אחרונים (יוני 2026)
+
+### v2.15 — תיקון קריטי של הסקרייפרים + CloakBrowser + 17/20 חנויות
+
+**שינויים מרכזיים:**
+- curl_cffi הותקן מחדש (היה חסר ב-venv)
+- הטורקי חזר לעבוד
+- Wine & More + Drinks4U עברו ל-curl_cffi + ProdBoxScraper
+- ManoVino אופטימיזציה דרמטית (696 מוצרים ב-8.5 שניות)
+- ManoVinoCloakScraper נוסף
+- AvivDrinks מושבת ב-Fast Mode (Elementor landing page)
+- תוצאה סופית: **17/20 חנויות** עובדות באופן אמין
+
+*עדכון זה נעשה על ידי Hermes Agent — 26 ביוני 2026*

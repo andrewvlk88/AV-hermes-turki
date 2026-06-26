@@ -133,12 +133,12 @@ STORE_STRATEGIES: dict[str, list[str]] = {
 
     # Playwright-first stores (JS-rendered SPAs)
     "manovino.co.il": ["playwright", "llm"],
-    "avivdrinks.co.il": ["playwright", "llm"],
-    "wineandmore.co.il": ["playwright", "llm"],
+    "avivdrinks.co.il": ["playwright"],  # non-functional (Elementor landing page only, no product catalog) — skipped in Fast Mode
+    "wineandmore.co.il": ["curl_cffi", "llm"],
     "mashkaot.co.il": ["playwright", "llm"],
     "eliasi.co.il": ["playwright", "llm"],
     "legima.co.il": ["playwright", "llm"],
-    "drinks4u.co.il": ["playwright", "llm"],
+    "drinks4u.co.il": ["curl_cffi", "llm"],
 }
 
 # Default fallback strategy for unknown domains
@@ -749,10 +749,10 @@ class UnifiedScraper:
         ("משקאות המשמח", "https://www.hamesameach.co.il", "woocommerce", "/search/result/?q={query}"),
         ("מנו וינו", "https://www.manovino.co.il", "playwright_manovino", "/search?q={query}"),
         ("בית המשקאות של אביב", "https://www.avivdrinks.co.il", "playwright_aviv", "/search/result/?q={query}"),
-        ("Wine & More", "https://www.wineandmore.co.il", "playwright_wineandmore", "/search?q={query}"),
+        ("Wine & More", "https://www.wineandmore.co.il", "prodbox_wineandmore", "/search?q={query}"),
         ("לגימה", "https://www.legima.co.il", "prodbox_legima", "/?s={query}&post_type=product"),
         ("Coffeco", "https://www.coffeco.co.il", "woocommerce", "/search/result/?q={query}"),
-        ("Drinks4U", "https://www.drinks4u.co.il", "prodbox_drinks4u", "/?s={query}&post_type=product"),
+        ("Drinks4U", "https://www.drinks4u.co.il", "prodbox_drinks4u", "/index.php?dir=site&page=catalog&op=search&q={query}"),
         ("Alcohol123", "https://www.alcohol123.co.il", "woocommerce", "/?s={query}&post_type=product"),
         ("בית היין", "https://www.winehouse.co.il", "woocommerce", "/?s={query}&post_type=product"),
         ("פרטוש משקאות", "https://partush-mashkaot.co.il", "woocommerce", "/?s={query}&post_type=product"),

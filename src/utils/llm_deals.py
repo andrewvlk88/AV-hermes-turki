@@ -32,7 +32,8 @@ _MAX_TOKENS = 256
 
 
 def llm_validate_deal(product_name: str, store_price: float, turki_price: float,
-                      query: str) -> Tuple[bool, str]:
+                      query: str, store_volume_ml: Optional[float] = None,
+                      turki_volume_ml: Optional[float] = None) -> Tuple[bool, str]:
     """Ask DeepSeek to validate whether a candidate deal is real.
 
     Returns:
@@ -43,8 +44,9 @@ def llm_validate_deal(product_name: str, store_price: float, turki_price: float,
     Cached with diskcache (SQLite-backed, survives restarts).
     Note: Deal prices change, so we cache by product+query, not by price.
     """
-    # Disk cache check — keyed by product+query (not price, which changes)
-    cache_key = f"deal:{query}:{product_name}"
+    # Disk cache check — keyed by product+query+volume (because volume is key)
+    vol_key = f"{store_volume_ml:.0f}" if store_volume_ml else "u"
+    cache_key = f"deal:{query}:{product_name}:{vol_key}"
     cached = cache_get(cache_key)
     if cached is not None:
         logger.debug("Cache hit for deal validation: %r", product_name)
@@ -53,19 +55,31 @@ def llm_validate_deal(product_name: str, store_price: float, turki_price: float,
     if not _API_KEY:
         return True, "LLM לא זמין — מאשר לפי הנתונים הקיימים"
 
+    vol_note = ""
+    if store_volume_ml and turki_volume_ml:
+        vol_note = (
+            f"Store volume: {store_volume_ml:.0f}ml\n"
+            f"Turki volume: {turki_volume_ml:.0f}ml\n"
+        )
+        if abs(store_volume_ml - turki_volume_ml) > 50:
+            reason = f"נפח שונה: חנות {store_volume_ml:.0f}ml מול טורקי {turki_volume_ml:.0f}ml"
+            cache_set(cache_key, (False, reason))
+            return False, reason
+
     prompt = (
         "You validate alcohol price deals. Decide if the store product is truly "
-        "the SAME product and SAME bottle volume as the search query, compared "
-        "against the Turki reference price.\n\n"
+        "the SAME product and SAME bottle volume as the Turki reference product.\n\n"
         f"Search query: {query}\n"
         f"Store product: {product_name}\n"
         f"Store price: ₪{store_price}\n"
-        f"Turki reference price: ₪{turki_price}\n\n"
+        f"Turki reference price: ₪{turki_price}\n"
+        f"{vol_note}\n"
         "Rules:\n"
-        "- Different volume (e.g., 200ml vs 1L) = NOT a real deal\n"
+        "- Different volume = NOT a real deal (already filtered above if volumes known)\n"
         "- Accessories, glasses, sets, gift boxes, miniatures = NOT a real deal\n"
         "- Event bundles ('ערב יין', 'פיקניק', 'אירוח בסטייל') = NOT a real deal\n"
-        "- Same product, same volume, lower price = real deal\n\n"
+        "- Same product, same volume, lower price = real deal\n"
+        "- If the query says 'ליטר' but both store and Turki products are the SAME 750ml variant, it IS a real deal (the query is just a starting point, not a strict volume constraint)\n\n"
         "Return ONLY valid JSON: {\"valid\": true/false, \"reason\": \"short Hebrew reason\"}\n"
         "No markdown, no explanation, just JSON."
     )

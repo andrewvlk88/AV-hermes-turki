@@ -306,11 +306,21 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
             if vol_key is not None:
                 full_key = f"{norm_name}_{vol_key:.0f}"
                 if full_key not in turki_lookup:
-                    turki_lookup[full_key] = {"price": best, "url": p.product_url, "name": p.product_name}
+                    turki_lookup[full_key] = {
+                        "price": best,
+                        "url": p.product_url,
+                        "name": p.product_name,
+                        "volume_ml": p.volume_ml or vol_key,
+                    }
             else:
                 # No volume info — match by name only
                 if norm_name not in turki_lookup:
-                    turki_lookup[norm_name] = {"price": best, "url": p.product_url, "name": p.product_name}
+                    turki_lookup[norm_name] = {
+                        "price": best,
+                        "url": p.product_url,
+                        "name": p.product_name,
+                        "volume_ml": p.volume_ml,
+                    }
     
     # Group by product — use normalized name + volume as key
     all_entries = {}
@@ -365,7 +375,14 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
             pct = (savings / turki_match["price"]) * 100
             if pct >= 5:  # Only show meaningful savings (5%+)
                 # LLM reasoning validation — only for candidate Turki deals
-                is_valid, reason = llm_validate_deal(display_name, cheapest["price"], turki_match["price"], query)
+                is_valid, reason = llm_validate_deal(
+                    display_name,
+                    cheapest["price"],
+                    turki_match["price"],
+                    query,
+                    store_volume_ml=cheapest.get("volume_ml"),
+                    turki_volume_ml=turki_match.get("volume_ml"),
+                )
                 if not is_valid:
                     lines.append(f"   ⚠️ נפסל ע" + "י LLM: " + reason)
                 else:
@@ -378,6 +395,9 @@ def build_report(all_prices: dict, query: str) -> PriceReport:
         
         for e in entries:
             if e["is_sale"]:
+                # Avoid duplicate if this sale entry is already the cheapest deal
+                if cheapest["store"] == e["store"] and turki_match and cheapest["price"] < turki_match["price"]:
+                    continue
                 deals.append(f"🔥 מבצע! {display_name} ב-{e['store']}: {e['price']:.0f}₪")
         
         lines.append("")

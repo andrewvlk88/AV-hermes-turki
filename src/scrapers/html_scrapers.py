@@ -29,6 +29,7 @@ except ImportError:
 
 from src.models import ProductPrice, Store
 from src.logger import get_logger
+from src.utils.filters import extract_volume_ml
 
 logger = get_logger(__name__)
 
@@ -577,12 +578,17 @@ class ProdBoxScraper:
         soup = BeautifulSoup(html.unescape(html_text), "lxml")
         products = []
         
-        # Find containers
-        containers = soup.find_all(["div", "li"], class_=re.compile(self.container_class, re.I))
+        # Find containers - include "a" for Drinks4U <a class="prod-box"> and "article" for Wine & More
+        containers = soup.find_all(["div", "li", "a", "article"], class_=re.compile(self.container_class, re.I))
         
         for c in containers:
-            # Title
+            # Title - improved extraction with fallbacks for layout_list_item + ProductItem
             title_el = c.find(class_=re.compile(self.title_class, re.I))
+            if not title_el:
+                # Fallback: try common title containers or the link itself
+                title_el = c.find(["h1", "h2", "h3", "h4", "span", "a"], class_=re.compile(r"title|name|text|heading", re.I))
+            if not title_el and c.name == "a" and c.get("href"):
+                title_el = c  # <a> itself may contain the title text
             name = title_el.get_text(strip=True)[:100] if title_el else ""
             if not name or len(name) < 3:
                 continue
@@ -593,6 +599,8 @@ class ProdBoxScraper:
             
             # Link
             a_tag = c.find("a", href=True)
+            if not a_tag and c.name == "a" and c.get("href"):
+                a_tag = c
             url = a_tag["href"] if a_tag else ""
             if url and url.startswith("/"):
                 url = self.store.url.rstrip("/") + url
@@ -600,7 +608,9 @@ class ProdBoxScraper:
             # Price
             price_el = c.find(class_=re.compile(self.price_class, re.I))
             price_text = price_el.get_text(separator=" ") if price_el else c.get_text(separator=" ")
-            prices = re.findall(r'(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח)', price_text)
+            prices = re.findall(r'(?:מחיר[^0-9]*)?(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח|NIS|ILS)', price_text, re.IGNORECASE)
+            if not prices:
+                prices = re.findall(r'(\d+[\d,]*\.?\d*)\s*(?:₪|ש"ח)', price_text)
             
             if not prices:
                 continue
