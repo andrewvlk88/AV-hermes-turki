@@ -131,13 +131,13 @@ STORE_STRATEGIES: dict[str, list[str]] = {
     "paneco.co.il": ["curl_cffi", "playwright", "llm"],
     "the-importer.co.il": ["curl_cffi", "playwright", "llm"],
 
-    # Playwright-first stores (JS-rendered SPAs)
-    "manovino.co.il": ["playwright", "llm"],
-    "avivdrinks.co.il": ["playwright"],  # non-functional (Elementor landing page only, no product catalog) — skipped in Fast Mode
+    # curl_cffi-first with playwright fallback (ensures Fast Mode coverage; curl_cffi tried first for HTML/JS-light stores)
+    "manovino.co.il": ["curl_cffi", "playwright", "llm"],
+    "avivdrinks.co.il": ["curl_cffi", "playwright", "llm"],  # Elementor; now covered in Fast Mode via curl_cffi
     "wineandmore.co.il": ["curl_cffi", "llm"],
-    "mashkaot.co.il": ["playwright", "llm"],
-    "eliasi.co.il": ["playwright", "llm"],
-    "legima.co.il": ["playwright", "llm"],
+    "mashkaot.co.il": ["curl_cffi", "playwright", "llm"],
+    "eliasi.co.il": ["curl_cffi", "playwright", "llm"],
+    "legima.co.il": ["curl_cffi", "playwright", "llm"],
     "drinks4u.co.il": ["curl_cffi", "llm"],
 }
 
@@ -216,11 +216,14 @@ def _get_store_strategy(url: str) -> list[str]:
 
     In Fast Mode, the active strategies have "playwright" stripped out,
     and the default strategy is ["curl_cffi", "llm"].
+
+    Logs the active strategy per-store for visibility.
     """
     domain = _extract_domain(url)
     active_strategies = _get_active_strategies()
     active_default = _get_active_default_strategy()
     strategy = active_strategies.get(domain, active_default)
+    logger.info("📋 Active strategy for %s: %s (Fast Mode: %s)", domain, strategy, FAST_MODE)
     return strategy
 
 
