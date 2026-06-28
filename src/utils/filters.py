@@ -226,7 +226,8 @@ def is_relevant_product(product_name: str, query: str, min_words: int = 1) -> bo
         token_overlap = 0
 
     # Accept if either similarity or token overlap is high enough
-    if similarity >= 0.70 or token_overlap >= 0.70:
+    if similarity >= 0.65 or token_overlap >= 0.65:
+        logger.debug("is_relevant_product: ACCEPTED via fuzzy (sim=%.2f, overlap=%.2f) for %s", similarity, token_overlap, product_name[:60])
         return True
 
     # ── Layer 3: Word-level matching (original algorithm) ──────────────

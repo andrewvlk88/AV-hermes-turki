@@ -479,3 +479,24 @@ Tests are in `tests/` — standalone scripts (not pytest), run manually:
 | `test_accessible_stores.py` | Check which stores are accessible |
 | `test_full_flow_with_strategist.py` | Full pipeline including Strategist |
 | `test_orchestrator_real_products.py` | Orchestrator with real products |
+
+---
+
+## Smart Search & Match (Query Normalizer + Relevance)
+
+### optimize_search_query()
+- מסיר stop-words ספציפיים לתחום (יין, אדום, ליטר וכו').
+- שומר על מילות מותג וסוג חשובות (לא מסיר "רזרב", "פרימיום").
+- מחזיר 2–4 מילות מפתח משמעותיות.
+- משתמש ב-`lru_cache` לביצועים.
+
+### is_relevant_product()
+- שילוב של:
+  1. בדיקת מספרים קריטיים (שנה, גיל, נפח) — חובה להתאים.
+  2. Fuzzy matching עם `difflib.SequenceMatcher` (סף 0.65).
+  3. Token overlap.
+  4. Word-level matching כ-fallback.
+- לוגים מפורטים ל-debugging (מדוע מוצר נדחה או התקבל).
+- עוצמה גבוהה יותר נגד false negatives במוצרים עם שמות ארוכים.
+
+המנגנון נועד לאזן בין דיוק גבוה לבין כיסוי טוב של חנויות WooCommerce.

@@ -21,7 +21,7 @@ import re
 # These are generic descriptors, category labels, volume/age units, and
 # common prefixes that WooCommerce/Magento can't use for meaningful matching.
 QUERY_STOP_WORDS = {
-    # Category labels
+    # Category labels (very generic - safe to remove)
     "יין", "אדום", "לבן", "רוזה", "rosé", "red", "white",
     "וודקה", "וויסקי", "ויסקי", "וויסקי", "whisky", "whiskey", "vodka",
     "ג'ין", "ג´ין", "gin", "רום", "rum", "טקילה", "tequila",
@@ -30,10 +30,10 @@ QUERY_STOP_WORDS = {
     # Volume / packaging
     "מ\"ל", "מ״ל", "ml", "ליטר", "liter", "litre", "בקבוק", "bottle",
     "מארז", "יחידות", "קופסא", "בקבוקון",
-    # Generic descriptors
+    # Generic descriptors that rarely help matching
     "כשר", "kosher", "ישראל", "israel", "טבעי", "organic",
-    "אורגינל", "original", "קלאסי", "classic", "פרימיום", "premium",
-    "רזרב", "reserve", "מיוחד", "special",
+    "אורגינל", "original", "קלאסי", "classic",
+    # Note: "רזרב", "פרימיום", "מיוחד" הושארו בכוונה כי הם חלק משמות מוצרים
 }
 
 

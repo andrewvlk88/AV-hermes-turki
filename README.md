@@ -1,4 +1,6 @@
-# AV Hermes Turki — Turkí Price Intelligence (v2.12.0) 🦃📊
+# AV Hermes Turki — Turkí Price Intelligence (v2.15.0) 🦃📊
+# תאריך עדכון: 2026-06-28 (Hermes v1.0.0)
+
 
 מנוע פייתון מתקדם להשוואת מחירי אלכוהול בזמן אמת ב-20 חנויות מובילות בישראל, המשתמש ב-**curl_cffi (Chrome TLS Impersonation)** כשכבת ה-fetch הראשית, עם fallback ל-**CloakBrowser (Stealth Chromium)** לאתרים כבדים, שמירה מיידית ב-**SQLite**, ומערכת **Adaptive Scraping Frequency** לחיסכון במשאבים ומניעת bans.
 
