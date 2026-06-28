@@ -463,10 +463,25 @@ def format_telegram(report: PriceReport) -> str:
 async def async_main(queries: List[str], output_dir: str = "data"):
     """Run search for all queries. Returns the last PriceReport for --json output."""
     from src.storage.sqlite_store import run_id_gen
+    from src.logger import setup_logger
     shared_run_id = run_id_gen()
     last_report = None
+    
+    # Generate timestamp and directory for log files
+    ts_folder = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path("logs") / ts_folder
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
     try:
         for query in queries:
+            safe = query.replace(" ", "_")[:30]
+            log_file_path = log_dir / f"{safe}_run.log"
+            
+            # Configure logging to go to console and a dedicated file for this query
+            setup_logger("turk_pi", log_file=str(log_file_path))
+            
+            logger.info("=== START OF RUN: QUERY='%s' RUN_ID='%s' ===", query, shared_run_id)
+            
             _print(f"\n{'='*50}")
             _print(f"🔎 *{query}*")
             _print(f"{'='*50}")
@@ -476,6 +491,7 @@ async def async_main(queries: List[str], output_dir: str = "data"):
             
             # Build report
             _print(f"\n📊 בונים דוח...")
+            logger.info("Building price comparison report")
             report = build_report(all_prices, query)
             last_report = report
             
@@ -500,8 +516,8 @@ async def async_main(queries: List[str], output_dir: str = "data"):
                             })
                     if structured_deals:
                         save_deal_scores(shared_run_id, query, structured_deals)
-                except Exception:
-                    pass
+                except Exception as db_err:
+                    logger.warning("Failed to save deal scores to DB: %s", db_err)
             
             # Save scraper health
             try:
@@ -513,14 +529,13 @@ async def async_main(queries: List[str], output_dir: str = "data"):
                     deal_count=len(report.deals_found),
                     anomaly_count=len(report.anomalies),
                 )
-            except Exception:
-                pass
+            except Exception as health_err:
+                logger.warning("Failed to save scraper health: %s", health_err)
             
-            # Save
+            # Save reports
             base = Path(output_dir)
             base.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe = query.replace(" ", "_")[:30]
             
             # JSON
             json_path = base / f"{safe}_{ts}.json"
@@ -538,6 +553,7 @@ async def async_main(queries: List[str], output_dir: str = "data"):
             
             _print(f"📁 JSON: {json_path}")
             _print(f"📄 דוח: {txt_path}")
+            _print(f"🪵 לוג ריצה מלא: {log_file_path}")
             
             # CSV export
             all_products = []
@@ -546,6 +562,8 @@ async def async_main(queries: List[str], output_dir: str = "data"):
             
             if all_products:
                 csv_paths = bulk_export(all_prices, report, output_dir, query=query)
+            
+            logger.info("=== END OF RUN: QUERY='%s' SUCCESS ===", query)
             
             # Telegram format
             _print(f"\n{format_telegram(report)}")
