@@ -359,6 +359,11 @@ async def _fetch_html_playwright(
             browser = await _create_cloak_context(store_name=store_name)
             page = await browser.new_page()
             try:
+                from playwright_stealth import stealth_async
+                await stealth_async(page)
+            except Exception as stealth_err:
+                logger.warning("Failed to apply stealth: %s", stealth_err)
+            try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 # Bypass age popup via JS click
                 try:

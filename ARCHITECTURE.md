@@ -313,7 +313,7 @@ keyword matching if LLM is unavailable. Plans are cached in-memory for
 | Accessory filtering | `filters.is_accessory()` | Drop glasses, gift sets, syrups |
 | 200ml/500ml exclusion | `filters.is_relevant_volume()` | Small bottles not comparable to Turki |
 | Progressive querying (WooCommerce/Magento) | API scrapers | Bypass strict server-side matching for Hebrew |
-| CloakBrowser non-persistent context | `playwright_scrapers._create_cloak_context()` | Avoid cookie/session interference between stores |
+| Patchright/Playwright context | `playwright_scrapers.get_browser_context()` | Create non-persistent browser context with Patchright/Playwright fallback. |
 | Age popup skip for Magento | `GenericPlaywrightScraper.search()` | Paneco/Importer age click caused wrong redirects |
 | Adaptive Scraping Frequency | `sqlite_store.get_query_price_stability()` | Skips scanning stable queries (no change in 30+ days) unless 24h passed since last successful scrape. |
 | Direct Deal Links | `run.py` + `cron_tracker.py` | If a competitor's price is 5%+ cheaper than Turki, appends a direct store product link `[קישור לחנות](url)` to the deal alert. |

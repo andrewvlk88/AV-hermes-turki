@@ -217,6 +217,19 @@ def filter_products_with_turki_match(all_prices: dict, query: str) -> dict:
                 turki_lookup[norm_name] = {"price": best, "url": p.product_url, "name": p.product_name}
 
     filtered = {"הטורקי": turki_products}
+    
+    # Build Turki product list for LLM fallback matching
+    turki_list_for_llm = []
+    for p in turki_products:
+        best = p.sale_price or p.regular_price
+        if best:
+            turki_list_for_llm.append({
+                "name": p.product_name,
+                "price": best,
+                "url": p.product_url,
+                "volume_ml": p.volume_ml or get_volume_key(p.product_name),
+            })
+    
     for store_name, products in all_prices.items():
         if store_name == "הטורקי":
             continue
@@ -227,6 +240,23 @@ def filter_products_with_turki_match(all_prices: dict, query: str) -> dict:
             key = f"{norm_name}_{vol:.0f}" if vol is not None else norm_name
             if find_turki_match(key, turki_lookup):
                 keep.append(p)
+            else:
+                # LLM fallback — ask the LLM if this product matches any Turki product
+                try:
+                    from src.utils.llm_match import llm_match_product
+                    matched = llm_match_product(
+                        p.product_name,
+                        p.volume_ml or vol,
+                        turki_list_for_llm[:10],
+                    )
+                    if matched:
+                        logger.info(
+                            "LLM matched '%s' → '%s' from %s",
+                            p.product_name, matched["name"], store_name,
+                        )
+                        keep.append(p)
+                except Exception as llm_err:
+                    logger.debug("LLM match failed for %s: %s", p.product_name, llm_err)
         if keep:
             filtered[store_name] = keep
     return filtered
